@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, String, Text,
-    UniqueConstraint, func, text,
+    Index, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.mutable import MutableDict, MutableList
@@ -63,9 +63,17 @@ class Source(Base):
 
 class Token(Base):
     __tablename__ = "token"
+    __table_args__ = (
+        # Токены сотрудников (source_id NULL) глобально уникальны, внешних людей
+        # и контактов — в пределах источника.
+        UniqueConstraint("source_id", "token", postgresql_nulls_not_distinct=True),
+        # Один постоянный токен на сотрудника.
+        Index("uq_token_employee_permanent", "employee_id", unique=True,
+              postgresql_where=text("source_id IS NULL")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    token: Mapped[str] = mapped_column(Text, unique=True)
+    token: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(Text)
     employee_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
     source_id: Mapped[int | None] = mapped_column(ForeignKey("source.id"))

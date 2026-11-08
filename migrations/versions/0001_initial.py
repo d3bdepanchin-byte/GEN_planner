@@ -135,8 +135,10 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['employee_id'], ['employee.id'], ),
     sa.ForeignKeyConstraint(['source_id'], ['source.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('token')
+    sa.UniqueConstraint('source_id', 'token', postgresql_nulls_not_distinct=True)
     )
+    op.create_index('uq_token_employee_permanent', 'token', ['employee_id'], unique=True,
+                    postgresql_where=sa.text('source_id IS NULL'))
     op.create_table('history',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('task_id', sa.Integer(), nullable=False),

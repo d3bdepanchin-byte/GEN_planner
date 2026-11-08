@@ -1,6 +1,8 @@
+import pytest
 from sqlalchemy import inspect, select
+from sqlalchemy.exc import IntegrityError
 
-from planerka.db.models import Employee, Task
+from planerka.db.models import Employee, Source, Task, Token
 
 
 def test_migration_creates_all_tables(session):
@@ -28,3 +30,42 @@ def test_employee_array(session):
     session.flush()
     session.expire_all()
     assert session.scalars(select(Employee)).one().name_variants == ['Ваня', 'Иван']
+
+
+def _source(session, sha):
+    s = Source(kind='planerka', path=f'{sha}.mp3', sha256=sha, status='new')
+    session.add(s)
+    session.flush()
+    return s
+
+
+def test_same_external_token_in_two_sources(session):
+    a, b = _source(session, 'a' * 64), _source(session, 'b' * 64)
+    session.add_all([Token(token='[X1]', kind='external', source_id=a.id),
+                     Token(token='[X1]', kind='external', source_id=b.id)])
+    session.flush()
+
+
+def test_duplicate_token_in_one_source_rejected(session):
+    a = _source(session, 'a' * 64)
+    session.add_all([Token(token='[X1]', kind='external', source_id=a.id),
+                     Token(token='[X1]', kind='external', source_id=a.id)])
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_duplicate_employee_token_rejected(session):
+    session.add_all([Token(token='[P1]', kind='employee'),
+                     Token(token='[P1]', kind='employee')])
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_second_permanent_token_for_employee_rejected(session):
+    e = Employee(full_name='Иван Петров')
+    session.add(e)
+    session.flush()
+    session.add_all([Token(token='[P1]', kind='employee', employee_id=e.id),
+                     Token(token='[P2]', kind='employee', employee_id=e.id)])
+    with pytest.raises(IntegrityError):
+        session.flush()
