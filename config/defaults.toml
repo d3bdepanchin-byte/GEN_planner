@@ -22,7 +22,7 @@ meeting_hours_max = 2  # старт
 fuzzy_threshold = 88  # старт
 
 [llm]
-model_extract = "claude-sonnet-5-5"  # старт; сверено по docs.claude.com (R9)
+model_extract = "claude-sonnet-5-5"  # старт; сверено с данными среды Claude Code 08.11.2026
 max_tokens = 8000  # старт
 max_attempts = 3  # старт
 
