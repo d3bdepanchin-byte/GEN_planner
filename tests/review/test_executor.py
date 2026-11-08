@@ -339,3 +339,18 @@ def test_numbers_as_plain_int_accepted(session, built, smirnov_tasks):
     wb['Задачи']['A2'] = smirnov_tasks[0].number
     wb.save(built.path)
     assert isinstance(parse_executor_file(built.path), ParsedReview)
+
+
+def test_reassign_keeps_terms_and_records_proposals(session, built, smirnov_tasks, employees):
+    review, parsed = returned(session, built, {
+        smirnov_tasks[0].number: {'решение': 'правка', 'ответственный': employees[1].full_name,
+                                  'срок': date(2026, 11, 20), 'задача': 'Новое название'},
+        smirnov_tasks[1].number: {'решение': 'подтверждаю'}})
+    apply_executor_review(session, review, parsed)
+    apply_executor_review(session, review, parsed)
+    t = tasks_in(session, review)[0]
+    assert t.due_date == date(2026, 11, 14) and t.title == 'Подготовить прайс-лист'
+    assert t.questions.count('исполнитель предлагает срок: 20.11.2026') == 1
+    assert t.questions.count('исполнитель предлагает название: Новое название') == 1
+    assert not session.scalars(select(History).where(History.task_id == t.id,
+                                                     History.event == 'правка')).all()

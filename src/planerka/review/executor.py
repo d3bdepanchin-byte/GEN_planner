@@ -291,18 +291,24 @@ def apply_executor_review(session: Session, review: ReviewFile, parsed: ParsedRe
                 continue
             report.to_owner += 1
         else:
-            if row.title:
-                _edit(session, task, "название", "title", row.title, actor)
-            if row.due_date:
-                _edit(session, task, "срок", "due_date", row.due_date, actor)
             new_owner = owners.get(row.number)
             if new_owner is not None and new_owner != task.owner_id:
+                # Условия передаваемой задачи решает владелец реестра: правки — только предложением.
                 if not _add_unique(task.flags, FLAG_REASSIGNED):
                     report.skipped += 1
                     continue
                 task.questions.append(f"исполнитель предлагает передать задачу: {names[new_owner]}")
+                if row.due_date:
+                    _add_unique(task.questions,
+                                f"исполнитель предлагает срок: {row.due_date:%d.%m.%Y}")
+                if row.title:
+                    _add_unique(task.questions, f"исполнитель предлагает название: {row.title}")
                 report.to_owner += 1
             else:
+                if row.title:
+                    _edit(session, task, "название", "title", row.title, actor)
+                if row.due_date:
+                    _edit(session, task, "срок", "due_date", row.due_date, actor)
                 transition(session, task, TaskStatus.CONFIRMED_BY_EXECUTOR, actor)
                 report.confirmed += 1
         if row.comment:
