@@ -18,6 +18,8 @@ class FakeMailer:
 
 
 class FakeInbox:
+    done_folder = "Обработано"
+
     def __init__(self, messages: list[IncomingMail] | None = None) -> None:
         self.messages = list(messages or [])
         self.done: list[str] = []

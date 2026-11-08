@@ -25,6 +25,8 @@ class Mailer(Protocol):
 
 
 class ServiceInbox(Protocol):
+    done_folder: str  # куда перекладываются обработанные письма
+
     def fetch_new(self) -> list[IncomingMail]: ...
 
     def mark_done(self, message_id: str) -> None:

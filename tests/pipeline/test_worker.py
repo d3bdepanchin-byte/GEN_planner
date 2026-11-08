@@ -1,15 +1,19 @@
+import smtplib
+import zipfile
 from datetime import timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from planerka.db.models import Job, ReviewFile, Source
 from planerka.llm.base import JsonLLMBase, LLMUnavailable
 from planerka.mail.base import IncomingMail
 from planerka.mail.fake import FakeInbox
 from planerka.pipeline import worker
+from planerka.pipeline.handlers import review as review_handlers
 from planerka.pipeline.jobs import enqueue, ensure_periodic
 from planerka.pipeline.worker import WorkerState, recover_interrupted, run_once, worker_cycle
 from planerka.settings import set_setting
@@ -70,6 +74,7 @@ def test_no_speech_mail_text(session, deps_silence, source_ready, host, run_unti
     assert 'Если файл не тот — положите в папку правильную запись.' in body
     assert 'На это письмо не отвечайте: ящик читает только система.' in body
     assert 'ещё раз' not in body
+    assert 'перешлите' not in body  # requeue «нет речи» не повторяет: пересылать незачем
 
 
 def test_no_speech_marks_source_and_mails_host(session, deps_silence, source_ready, host,
@@ -284,36 +289,86 @@ def test_poll_mail_marks_done_after_accept(session, deps, settings, clock):
 def test_poll_mail_failure_not_marked(session, deps, settings, clock, monkeypatch):
     deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл'),
                             IncomingMail('<m2@example.test>', 'b@example.test', 'Re: файл')])
-    real = deps.mailer.send
-
-    def flaky(to, *a, **kw):
-        if to == 'a@example.test':
-            raise OSError('smtp down')
-        return real(to, *a, **kw)
-    monkeypatch.setattr(deps.mailer, 'send', flaky)
+    _refuse_for(deps, monkeypatch, 'a@example.test')
     enqueue(session, 'poll_mail', {})
     run_once(session, deps, clock.now)
     assert deps.inbox.done == ['<m2@example.test>']  # m1 перечитается при следующем опросе
+    assert deps.mail_failures == {'<m1@example.test>': 1}
     job = session.scalars(select(Job).where(Job.kind == 'poll_mail')).one()
     assert job.status == 'done'
 
 
-def test_poison_mail_set_aside_with_one_alert(session, deps, settings, clock, monkeypatch):
-    deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл')])
+def _refuse_for(deps, monkeypatch, address):
     real = deps.mailer.send
 
     def refused(to, *a, **kw):
-        if to == 'a@example.test':
-            raise OSError('recipient refused')
+        if to == address:
+            raise smtplib.SMTPRecipientsRefused({to: (550, b'no such user')})
         return real(to, *a, **kw)
     monkeypatch.setattr(deps.mailer, 'send', refused)
+
+
+def test_poison_mail_set_aside_with_one_alert(session, deps, settings, clock, monkeypatch):
+    deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл'),
+                            IncomingMail('<m2@example.test>', 'b@example.test', 'Re: файл')])
+    _refuse_for(deps, monkeypatch, 'a@example.test')
     for i in range(7):
         enqueue(session, 'poll_mail', {})
         run_once(session, deps, clock.now + timedelta(minutes=i))
-        assert deps.inbox.done == ([] if i < 4 else ['<m1@example.test>'])
+        assert '<m2@example.test>' in deps.inbox.done  # остальные письма обрабатываются
+        assert ('<m1@example.test>' in deps.inbox.done) == (i >= 4)
     alerts = [m for m in deps.mailer.sent if m['to'] == DEV]
-    assert len(alerts) == 1 and 'OSError' in alerts[0]['body']
+    assert len(alerts) == 1 and 'SMTPRecipientsRefused' in alerts[0]['body']
+    assert '«Обработано»' in alerts[0]['body']
     assert all(j.status == 'done' for j in session.scalars(select(Job)))
+
+
+def test_smtp_outage_is_not_poison_mail(session, deps, settings, run_until_idle, monkeypatch):
+    deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл'),
+                            IncomingMail('<m2@example.test>', 'b@example.test', 'Re: файл')])
+
+    def down(*a, **kw):
+        raise smtplib.SMTPServerDisconnected('gone')
+    monkeypatch.setattr(deps.mailer, 'send', down)
+    enqueue(session, 'poll_mail', {})
+    run_until_idle(session, deps)
+    job = session.scalars(select(Job).where(Job.kind == 'poll_mail')).one()
+    assert (job.status, job.attempts, job.last_error) == ('failed', 5, 'SMTPServerDisconnected')
+    assert deps.inbox.done == [] and deps.mail_failures == {}
+
+
+def test_db_outage_is_not_poison_mail(session, deps, settings, clock, monkeypatch):
+    deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл')])
+
+    def db_down(*a, **kw):
+        raise OperationalError('SELECT 1', {}, Exception('connection lost'))
+    monkeypatch.setattr(review_handlers, 'accept_review_mail', db_down)
+    enqueue(session, 'poll_mail', {})
+    for i in range(3):
+        run_once(session, deps, clock.now + timedelta(hours=i))
+    assert deps.inbox.done == [] and deps.mail_failures == {}
+    job = session.scalars(select(Job).where(Job.kind == 'poll_mail')).one()
+    assert (job.status, job.attempts, job.last_error) == ('pending', 3, 'OperationalError')
+
+
+@pytest.mark.parametrize('error, counted', [
+    (smtplib.SMTPRecipientsRefused({'a@example.test': (550, b'no')}), True),
+    (smtplib.SMTPDataError(554, b'rejected'), True),
+    (smtplib.SMTPDataError(451, b'try later'), False),
+    (smtplib.SMTPSenderRefused(550, b'no', 'planerka@example.test'), True),
+    (smtplib.SMTPSenderRefused(421, b'busy', 'planerka@example.test'), False),
+    (smtplib.SMTPServerDisconnected('gone'), False),
+    (smtplib.SMTPConnectError(421, b'down'), False),
+    (smtplib.SMTPAuthenticationError(535, b'bad'), False),
+    (TimeoutError(), False),
+    (ConnectionResetError(), False),
+    (OSError('net'), False),
+    (OperationalError('SELECT 1', {}, Exception()), False),
+    (zipfile.BadZipFile('broken xlsx'), True),
+    (ValueError('bad cell'), True),
+])
+def test_message_specific_errors(error, counted):
+    assert review_handlers.message_specific(error) is counted
 
 
 class DownInbox:

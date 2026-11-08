@@ -97,12 +97,12 @@ def _recording(deps: Deps, source: Source, when: str) -> str:
 def _host_message(session: Session, deps: Deps, source: Source) -> tuple[str, str]:
     when = ru_date(source.meeting_date)
     recording = _recording(deps, source, when)
-    developer = get_setting(session, 'alerts.developer_email')
-    forward = [f'Если это планёрка — перешлите это письмо на {developer}.'] if developer else []
     if source.status == NO_SPEECH:
         lines = [f'В {recording} не распознана речь, задачи не созданы.',
-                 'Если файл не тот — положите в папку правильную запись.', *forward]
+                 'Если файл не тот — положите в папку правильную запись.']
         return f'Запись {when}: нет речи', '\n'.join([*lines, NO_REPLY]) + '\n'
+    developer = get_setting(session, 'alerts.developer_email')
+    forward = [f'Если это планёрка — перешлите это письмо на {developer}.'] if developer else []
     phrases = list(get_setting(session, 'intake.opening_phrases.planerka'))
     phrase = phrases[0][:1].upper() + phrases[0][1:] if phrases else ''
     lines = [f'В начале {recording} нет фразы открытия: запись не разобрана, задачи не созданы.',

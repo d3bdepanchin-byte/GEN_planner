@@ -3,11 +3,13 @@
 Письма уходят по одному с фиксацией после каждого: сбой на втором не повторяет первое.
 """
 import logging
+import smtplib
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from planerka.core.statuses import TaskStatus
@@ -79,8 +81,10 @@ def send_reviews(session: Session, deps: Deps, payload: dict, now: datetime) -> 
 def poll_mail(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
     """Ответы на файлы. Письмо помечается обработанным только после фиксации в БД.
 
-    Неудачное письмо остаётся во входящих и перечитывается при следующем опросе; после
-    jobs.max_attempts неудач подряд оно убирается без ответа и уходит один алерт.
+    Ошибка самого письма (адрес отклонён, вложение не читается) — письмо остаётся во входящих;
+    после jobs.max_attempts таких неудач подряд оно убирается без ответа, один алерт.
+    Сбой почтового сервера или БД — не вина письма: проход прерывается без счёта, задание
+    идёт обычным путём повторов и алертов.
     """
     limit = int(get_setting(session, 'jobs.max_attempts'))
     for mail in deps.inbox.fetch_new():
@@ -88,13 +92,26 @@ def poll_mail(session: Session, deps: Deps, payload: dict, now: datetime) -> Non
             outcome = accept_review_mail(session, mail, deps.mailer,
                                          own_address=deps.env.service_mailbox)
             session.commit()
-        except Exception as e:  # noqa: BLE001 — одно письмо не должно останавливать ящик
+        except Exception as e:  # noqa: BLE001 — разбираем ниже
             session.rollback()
+            if not message_specific(e):
+                raise
             _mail_failed(session, deps, mail.message_id, type(e).__name__, limit)
             continue
         deps.mail_failures.pop(mail.message_id, None)
         deps.inbox.mark_done(mail.message_id)
         log.info('письмо обработано: %s', outcome.value)
+
+
+def message_specific(error: Exception) -> bool:
+    """Ошибка этого письма (счётчик письма) или сбой сервера/БД (прервать опрос, без счёта)."""
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return True
+    if isinstance(error, (smtplib.SMTPSenderRefused, smtplib.SMTPDataError)):
+        return error.smtp_code >= 500  # 4xx — временный отказ сервера
+    if isinstance(error, (OSError, SQLAlchemyError)):  # SMTPException — тоже OSError
+        return False
+    return True  # разбор и чтение вложения этого письма
 
 
 def _mail_failed(session: Session, deps: Deps, message_id: str, error: str, limit: int) -> None:
@@ -110,7 +127,8 @@ def _mail_failed(session: Session, deps: Deps, message_id: str, error: str, limi
         return
     deps.mail_failures.pop(message_id, None)
     alert(session, deps, 'poll_mail', None,
-          f'письмо не обработано {count} раз ({error}), убрано из входящих без ответа')
+          f'письмо не обработано {count} раз ({error}), перенесено без ответа в папку '
+          f'«{deps.inbox.done_folder}» служебного ящика')
 
 
 def reminders(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
