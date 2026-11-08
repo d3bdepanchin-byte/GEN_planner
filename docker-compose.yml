@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: planerka
+      POSTGRES_PASSWORD: planerka  # локальная dev-база, не секрет
+      POSTGRES_DB: planerka
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/db-init.sql:/docker-entrypoint-initdb.d/db-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planerka -d planerka"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      args:
+        INSTALL_ASR: ${INSTALL_ASR:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://planerka:planerka@db:5432/planerka
+      DATABASE_URL_TEST: postgresql+psycopg://planerka:planerka@db:5432/planerka_test
+    volumes:
+      - .:/app
+    working_dir: /app
+
+volumes:
+  pgdata:

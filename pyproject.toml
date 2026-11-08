@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "planerka"
+version = "0.1.0"
+description = "Планёрка: записи встреч в задачи с ответственным и сроком"
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "alembic",
+    "psycopg[binary]>=3.1",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "anthropic",
+    "openpyxl",
+    "rapidfuzz",
+    "natasha",
+    "jiwer",
+]
+
+[project.optional-dependencies]
+# Распознавание речи: тяжёлые пакеты (torch), на сервере ставятся по умолчанию.
+# gigaam ставится из git по README репозитория salute-developers/GigaAM.
+asr = [
+    "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM",
+    "faster-whisper",
+]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not models and not mail'"
+testpaths = ["tests"]
+markers = [
+    "models: тесты с настоящими моделями, только на сервере",
+    "mail: тесты с настоящим служебным ящиком, только на сервере",
+]
