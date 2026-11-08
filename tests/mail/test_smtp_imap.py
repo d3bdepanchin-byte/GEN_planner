@@ -1,0 +1,118 @@
+from email import message_from_bytes, policy
+from email.message import EmailMessage
+
+import pytest
+
+from planerka.mail import imap, smtp
+from planerka.mail.imap import ImapServiceInbox, imap_utf7_encode, parse_message
+from planerka.mail.smtp import SmtpMailer
+from planerka.settings import Env
+
+
+def env(tmp_path, **kw):
+    return Env(database_url='x', service_mailbox='planerka@example.test', smtp_host='smtp.example.test',
+               smtp_port=465, smtp_user='u', smtp_password='p', imap_host='imap.example.test',
+               imap_user='u', imap_password='p', data_dir=tmp_path, **kw)
+
+
+def test_utf7_done_folder():
+    assert imap_utf7_encode('Обработано') == '&BB4EMQRABDAEMQQ+BEIEMAQ9BD4-'
+
+
+def test_utf7_ascii_and_ampersand():
+    assert imap_utf7_encode('INBOX') == 'INBOX'
+    assert imap_utf7_encode('A&B') == 'A&-B'
+    out = imap_utf7_encode('Файл/1')
+    assert out.startswith('&') and out.endswith('-/1') and ',' not in out[:-3]
+
+
+class FakeSMTP:
+    instances = []
+
+    def __init__(self, host, port, *a, **k):
+        self.kind, self.port, self.calls, self.msg = type(self).__name__, port, [], None
+        FakeSMTP.instances.append(self)
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def starttls(self, **k): self.calls.append('starttls')
+    def login(self, u, p): self.calls.append('login')
+    def send_message(self, msg): self.msg = msg
+
+
+class FakeSMTPSSL(FakeSMTP):
+    pass
+
+
+@pytest.mark.parametrize('port, kind, tls', [(465, 'FakeSMTPSSL', False), (587, 'FakeSMTP', True)])
+def test_smtp_ssl_or_starttls(monkeypatch, tmp_path, port, kind, tls):
+    FakeSMTP.instances.clear()
+    monkeypatch.setattr(smtp.smtplib, 'SMTP', FakeSMTP)
+    monkeypatch.setattr(smtp.smtplib, 'SMTP_SSL', FakeSMTPSSL)
+    e = env(tmp_path)
+    e.smtp_port = port
+    f = tmp_path / 'уточнение_1_2.xlsx'
+    f.write_bytes(b'data')
+    mid = SmtpMailer(e).send('a@example.test', 'Тема', 'Текст', [f], in_reply_to='<x@y>')
+    inst = FakeSMTP.instances[-1]
+    assert inst.kind == kind and ('starttls' in inst.calls) is tls and 'login' in inst.calls
+    msg = inst.msg
+    assert msg['Message-ID'] == mid and mid.endswith('@example.test>')
+    assert msg['In-Reply-To'] == '<x@y>' and msg['From'] == 'planerka@example.test'
+    parsed = message_from_bytes(msg.as_bytes(), policy=policy.default)
+    assert parsed['Subject'] == 'Тема'
+    assert [p.get_filename() for p in parsed.iter_attachments()] == ['уточнение_1_2.xlsx']
+    assert parsed.get_body().get_content().strip() == 'Текст'
+
+
+def raw_mail():
+    m = EmailMessage()
+    m['From'] = 'Смирнов <smirnov@example.test>'
+    m['Subject'] = 'Re: Уточнение'
+    m['Message-ID'] = '<m1@example.test>'
+    m['Auto-Submitted'] = 'no'
+    m.set_content('ответ')
+    m.add_attachment(b'1', maintype='application', subtype='octet-stream', filename='ответ ../x.xlsx')
+    m.add_attachment(b'2', maintype='application', subtype='octet-stream', filename='ответ ../x.xlsx')
+    return m.as_bytes()
+
+
+def test_parse_message_saves_sanitized_attachments(tmp_path):
+    mail = parse_message(raw_mail(), tmp_path)
+    assert mail.message_id == '<m1@example.test>' and mail.subject == 'Re: Уточнение'
+    assert mail.headers['Auto-Submitted'] == 'no'
+    assert 'smirnov@example.test' in mail.sender
+    assert len(mail.attachments) == 2 and len(set(mail.attachments)) == 2
+    for p in mail.attachments:
+        assert p.parent.parent == tmp_path / 'mail' and len(p.parent.name) == 16
+        assert p.parent == mail.attachments[0].parent
+        assert '/' not in p.name and p.suffix == '.xlsx' and p.read_bytes() in (b'1', b'2')
+
+
+class FakeImap:
+    """Минимальный IMAP4_SSL: запоминает команды."""
+    def __init__(self, move):
+        self.move, self.log, self.folders = move, [], []
+
+    def capability(self): return 'OK', [b'IMAP4rev1 MOVE' if self.move else b'IMAP4rev1']
+    def select(self, f): self.log.append(('select', f)); return 'OK', [b'1']
+    def list(self): return 'OK', [b'(\\HasNoChildren) "/" "INBOX"'] + [
+        f'(\\HasNoChildren) "/" "{f}"'.encode() for f in self.folders]
+    def create(self, f): self.log.append(('create', f)); self.folders.append(f); return 'OK', []
+    def uid(self, cmd, *a): self.log.append((cmd, *a)); return 'OK', [b'7'] if cmd == 'SEARCH' else []
+    def expunge(self): self.log.append(('expunge',)); return 'OK', []
+    def logout(self): return 'BYE', []
+
+
+@pytest.mark.parametrize('move', [True, False])
+def test_mark_done_move_or_copy(monkeypatch, tmp_path, move):
+    fake = FakeImap(move)
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    fake.login = lambda u, p: ('OK', [])
+    ImapServiceInbox(env(tmp_path)).mark_done('<m1@example.test>')
+    cmds = [c[0] for c in fake.log]
+    assert ('create', '&BB4EMQRABDAEMQQ+BEIEMAQ9BD4-') in fake.log
+    if move:
+        assert 'MOVE' in cmds and 'COPY' not in cmds
+    else:
+        assert 'COPY' in cmds and 'STORE' in cmds and 'expunge' in cmds
