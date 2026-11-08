@@ -15,8 +15,8 @@ from planerka.db.models import Setting
 class Env(BaseModel):
     """Переменные окружения. Имя переменной — имя поля в верхнем регистре."""
 
-    database_url: str
-    database_url_test: str = ""
+    database_url: str = Field(repr=False)  # содержит пароль БД
+    database_url_test: str = Field("", repr=False)
     anthropic_api_key: str = Field("", repr=False)
     hf_token: str = Field("", repr=False)
     smtp_host: str = ""

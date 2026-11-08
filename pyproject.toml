@@ -33,9 +33,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not models and not mail'"
-filterwarnings = [
-    "ignore:Attribute name .registry. should be left reserved:sqlalchemy.exc.SAWarning",
-]
 testpaths = ["tests"]
 markers = [
     "models: тесты с настоящими моделями, только на сервере",

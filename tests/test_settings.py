@@ -44,9 +44,11 @@ def test_load_env_default_paths():
 
 def test_secrets_not_in_repr():
     env = load_env({
-        'DATABASE_URL': 'x', 'ANTHROPIC_API_KEY': 'sk-secret-1', 'HF_TOKEN': 'hf-secret-2',
+        'DATABASE_URL': 'postgresql://u:db-secret-6@h/d', 'DATABASE_URL_TEST': 'postgresql://u:db-secret-7@h/t',
+        'ANTHROPIC_API_KEY': 'sk-secret-1', 'HF_TOKEN': 'hf-secret-2',
         'SMTP_PASSWORD': 'pw-secret-3', 'IMAP_PASSWORD': 'pw-secret-4',
         'BACKUP_PASSPHRASE': 'pass-secret-5'})
     text = repr(env)
-    for secret in ('sk-secret-1', 'hf-secret-2', 'pw-secret-3', 'pw-secret-4', 'pass-secret-5'):
+    for secret in ('sk-secret-1', 'hf-secret-2', 'pw-secret-3', 'pw-secret-4', 'pass-secret-5',
+                   'db-secret-6', 'db-secret-7'):
         assert secret not in text

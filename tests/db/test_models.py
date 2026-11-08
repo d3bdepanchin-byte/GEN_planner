@@ -17,11 +17,16 @@ def test_task_defaults(session, task):
     assert task.questions == [] and task.flags == []
 
 
-def test_list_append_is_persisted(session, task):
-    task.flags = [*task.flags, 'нет срока']
+def test_in_place_changes_are_tracked(session, task):
+    task.flags.append('нет срока')
+    task.questions.append('Кто исполнитель?')
+    source = _source(session, 'c' * 64)
+    source.flags['k'] = 'v'
     session.flush()
-    session.expire(task)
+    session.expire_all()
     assert task.flags == ['нет срока']
+    assert task.questions == ['Кто исполнитель?']
+    assert source.flags == {'k': 'v'}
 
 
 def test_employee_array(session):

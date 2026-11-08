@@ -1,4 +1,5 @@
 """Модель данных. Статусы хранятся метками для людей (TaskStatus.value)."""
+import warnings
 from datetime import date, datetime
 from typing import Any
 
@@ -6,6 +7,7 @@ from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, String, Text,
     Index, UniqueConstraint, func, text,
 )
+from sqlalchemy.exc import SAWarning
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -80,39 +82,43 @@ class Token(Base):
     surface: Mapped[str | None] = mapped_column(Text)
 
 
-class Task(Base):
-    __tablename__ = "task"
+# Task.registry — осознанное имя поля из спеки; SQLAlchemy считает `registry` зарезервированным.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message="Attribute name 'registry'", category=SAWarning)
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    number: Mapped[int] = mapped_column(Integer, unique=True)
-    title: Mapped[str] = mapped_column(Text)
-    type: Mapped[str] = mapped_column(Text)
-    priority: Mapped[str | None] = mapped_column(Text)
-    goal_2027: Mapped[str | None] = mapped_column(Text)
-    author_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
-    owner_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
-    coexecutor_ids: Mapped[list[int]] = mapped_column(
-        IntList, server_default=text("'{}'"), default=list)
-    due_date: Mapped[date | None] = mapped_column(Date)
-    control_date: Mapped[date | None] = mapped_column(Date)
-    done_criteria: Mapped[str | None] = mapped_column(Text)
-    source_id: Mapped[int | None] = mapped_column(ForeignKey("source.id"))
-    timecode: Mapped[str | None] = mapped_column(Text)
-    quote: Mapped[str | None] = mapped_column(Text)
-    confidence: Mapped[str | None] = mapped_column(Text)
-    confidence_reason: Mapped[str | None] = mapped_column(Text)
-    questions: Mapped[list[str]] = mapped_column(
-        TextList, server_default=text("'{}'"), default=list)
-    flags: Mapped[list[str]] = mapped_column(
-        TextList, server_default=text("'{}'"), default=list)
-    source_closed: Mapped[bool] = mapped_column(
-        Boolean, server_default=text("false"), default=False)
-    registry: Mapped[str] = mapped_column(Text, server_default="общий", default="общий")
-    registry_suggested: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        Timestamp, server_default=func.now(), onupdate=func.now())
+    class Task(Base):
+        __tablename__ = "task"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        number: Mapped[int] = mapped_column(Integer, unique=True)
+        title: Mapped[str] = mapped_column(Text)
+        type: Mapped[str] = mapped_column(Text)
+        priority: Mapped[str | None] = mapped_column(Text)
+        goal_2027: Mapped[str | None] = mapped_column(Text)
+        author_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
+        owner_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
+        coexecutor_ids: Mapped[list[int]] = mapped_column(
+            IntList, server_default=text("'{}'"), default=list)
+        due_date: Mapped[date | None] = mapped_column(Date)
+        control_date: Mapped[date | None] = mapped_column(Date)
+        done_criteria: Mapped[str | None] = mapped_column(Text)
+        source_id: Mapped[int | None] = mapped_column(ForeignKey("source.id"))
+        timecode: Mapped[str | None] = mapped_column(Text)
+        quote: Mapped[str | None] = mapped_column(Text)
+        confidence: Mapped[str | None] = mapped_column(Text)
+        confidence_reason: Mapped[str | None] = mapped_column(Text)
+        questions: Mapped[list[str]] = mapped_column(
+            TextList, server_default=text("'{}'"), default=list)
+        flags: Mapped[list[str]] = mapped_column(
+            TextList, server_default=text("'{}'"), default=list)
+        source_closed: Mapped[bool] = mapped_column(
+            Boolean, server_default=text("false"), default=False)
+        registry: Mapped[str] = mapped_column(Text, server_default="общий", default="общий")
+        registry_suggested: Mapped[str | None] = mapped_column(Text)
+        status: Mapped[str] = mapped_column(Text)
+        created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
+        updated_at: Mapped[datetime] = mapped_column(
+            Timestamp, server_default=func.now(), onupdate=func.now())
 
 
 class TaskEdit(Base):

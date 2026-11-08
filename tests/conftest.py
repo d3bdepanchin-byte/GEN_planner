@@ -7,6 +7,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from planerka.core.numbering import next_task_number
 from planerka.core.statuses import TaskStatus
 from planerka.db.models import Task
 
@@ -49,9 +50,9 @@ def session(test_engine):
 
 @pytest.fixture
 def task(session):
-    """Задача № 1 в статусе «на подтверждении». Нумерация — задача 4."""
+    """Задача в статусе «на подтверждении» с номером из последовательности."""
     t = Task(
-        number=1,
+        number=next_task_number(session),
         title="Подготовить прайс-лист",
         type="задача",
         priority="обычный",

@@ -7,7 +7,8 @@ from planerka.db.models import Base
 from planerka.settings import load_env
 
 config = context.config
-if config.config_file_name is not None:
+# В тестах URL приходит через attributes: логирование pytest не трогаем.
+if config.config_file_name is not None and not config.attributes.get("url"):
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
