@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from planerka.mail.base import IncomingMail
+from planerka.mail.base import AUTO_HEADERS, IncomingMail
 
 
 class FakeMailer:
@@ -12,6 +12,7 @@ class FakeMailer:
         message_id = f"<fake-{len(self.sent) + 1}@example.test>"
         self.sent.append({"to": to, "subject": subject, "body": body,
                           "attachments": list(attachments), "in_reply_to": in_reply_to,
+                          "headers": dict(AUTO_HEADERS) if in_reply_to else {},
                           "message_id": message_id})
         return message_id
 

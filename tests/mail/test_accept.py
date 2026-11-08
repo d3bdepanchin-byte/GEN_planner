@@ -194,3 +194,46 @@ def test_fake_inbox_mark_done():
     assert inbox.fetch_new() == [m]
     inbox.mark_done(m.message_id)
     assert inbox.fetch_new() == []
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'headers': {'Return-Path': '<>'}},
+    {'sender': 'MAILER-DAEMON@example.test'},
+    {'sender': 'Mail Delivery <Postmaster@example.test>'},
+    {'headers': {'Content-Type': 'multipart/report; report-type=delivery-status'}},
+    {'sender': 'Planerka <Service@example.test>'},
+])
+def test_loop_guards_no_reply(session, mailer, kwargs):
+    mail = make_mail(**kwargs)
+    out = accept_review_mail(session, mail, mailer, own_address='service@example.test')
+    assert out == AcceptOutcome.IGNORED_AUTOREPLY
+    assert mailer.sent == []
+
+
+def test_return_path_normal_is_not_ignored(session, mailer):
+    mail = make_mail(headers={'Return-Path': '<smirnov@example.test>'})
+    assert accept_review_mail(session, mail, mailer) == AcceptOutcome.HINT_SENT
+
+
+def test_replies_carry_auto_markers():
+    """Контракт Mailer: ответ (с in_reply_to) помечается как автоматический."""
+    from planerka.mail.fake import FakeMailer
+    m = FakeMailer()
+    m.send('a@example.test', 's', 'b', [], in_reply_to='<x@y>')
+    assert m.sent[-1]['headers'] == {'Auto-Submitted': 'auto-replied', 'Precedence': 'auto_reply'}
+    m.send('a@example.test', 's', 'b', [])
+    assert m.sent[-1]['headers'] == {}
+
+
+class BrokenMailer:
+    def send(self, *a, **k):
+        raise RuntimeError('smtp down')
+
+
+def test_mailer_failure_propagates_and_rolls_back(session, review_tasks, mail_valid):
+    with pytest.raises(RuntimeError):
+        with session.begin_nested():  # вызывающий откатывает сессию при ошибке отправки
+            accept_review_mail(session, mail_valid, BrokenMailer())
+    for t in review_tasks:
+        session.refresh(t)
+    assert all(t.status == 'на подтверждении' for t in review_tasks)

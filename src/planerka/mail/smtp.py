@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
 
+from planerka.mail.base import AUTO_HEADERS
 from planerka.settings import Env
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ class SmtpMailer:
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
+            for name, value in AUTO_HEADERS.items():
+                msg[name] = value
         msg.set_content(body)
         for path in attachments:
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"

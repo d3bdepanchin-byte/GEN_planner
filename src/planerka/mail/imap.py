@@ -6,10 +6,12 @@ import re
 from email import message_from_bytes, policy
 from pathlib import Path
 
-from planerka.mail.base import IncomingMail
+from planerka.mail.base import IncomingMail, MailError
 from planerka.settings import Env
 
 log = logging.getLogger(__name__)
+
+MAX_STEM_BYTES = 100
 
 
 def imap_utf7_encode(text: str) -> str:
@@ -36,7 +38,12 @@ def imap_utf7_encode(text: str) -> str:
 
 def _sanitize(name: str) -> str:
     name = re.sub(r"[^\w.\- ()]", "_", name.replace("\\", "/").rsplit("/", 1)[-1]).strip(" .")
-    return name or "attachment"
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    ext = ext.encode()[:10].decode(errors="ignore")
+    stem = stem.encode()[:MAX_STEM_BYTES].decode(errors="ignore").strip(" .")
+    return (f"{stem or 'attachment'}.{ext}" if ext else stem) or "attachment"
 
 
 def _unique(directory: Path, name: str) -> Path:
@@ -97,7 +104,11 @@ class ImapServiceInbox:
                 raw = next((p[1] for p in parts if isinstance(p, tuple)), None)
                 if raw is None:
                     continue
-                mail = parse_message(raw, self.env.data_dir)
+                try:
+                    mail = parse_message(raw, self.env.data_dir)
+                except Exception as exc:  # одно битое письмо не должно блокировать ящик
+                    log.warning("письмо пропущено при разборе: %s", type(exc).__name__)
+                    continue
                 self._uids[mail.message_id] = uid
                 result.append(mail)
             log.info("служебный ящик: писем %d", len(result))
@@ -105,33 +116,46 @@ class ImapServiceInbox:
         finally:
             conn.logout()
 
+    @staticmethod
+    def _ok(result, what: str) -> None:
+        if result[0] != "OK":
+            raise MailError(f"IMAP: {what} не выполнено")
+
     def _ensure_folder(self, conn: imaplib.IMAP4_SSL, folder: str) -> None:
-        _, listing = conn.list()
+        status, listing = conn.list()
+        self._ok((status,), "LIST")
         names = [(line.decode() if isinstance(line, bytes) else str(line)) for line in listing or []]
         if not any(n.rstrip('"').endswith(folder) for n in names):
-            conn.create(folder)
+            self._ok(conn.create(folder), "CREATE")
 
     def mark_done(self, message_id: str) -> None:
+        """Перекладывает письмо в done_folder. Любой отказ сервера — MailError, письмо остаётся."""
         folder = imap_utf7_encode(self.done_folder)
         conn = self._connect()
         try:
             self._ensure_folder(conn, folder)
-            conn.select("INBOX")
+            self._ok(conn.select("INBOX"), "SELECT")
             uid = self._uids.get(message_id)
             if uid is None:
-                _, data = conn.uid("SEARCH", None, "HEADER", "Message-ID", _quote(message_id))
+                status, data = conn.uid("SEARCH", None, "HEADER", "Message-ID", _quote(message_id))
+                self._ok((status,), "SEARCH")
                 found = (data[0] or b"").split()
                 if not found:
                     return
                 uid = found[0]
+            status, caps_raw = conn.capability()
+            self._ok((status,), "CAPABILITY")
             caps = " ".join(c.decode() if isinstance(c, bytes) else str(c)
-                            for c in conn.capability()[1]).upper()
-            if "MOVE" in caps.split():
-                conn.uid("MOVE", uid, _quote(folder))
+                            for c in caps_raw).upper().split()
+            if "MOVE" in caps:
+                self._ok(conn.uid("MOVE", uid, _quote(folder)), "MOVE")
             else:
-                conn.uid("COPY", uid, _quote(folder))
-                conn.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
-                conn.expunge()
+                self._ok(conn.uid("COPY", uid, _quote(folder)), "COPY")
+                self._ok(conn.uid("STORE", uid, "+FLAGS", "(\\Deleted)"), "STORE")
+                if "UIDPLUS" in caps:  # убираем только своё письмо, чужие \Deleted не трогаем
+                    self._ok(conn.uid("EXPUNGE", uid), "EXPUNGE")
+                else:
+                    self._ok(conn.expunge(), "EXPUNGE")
             self._uids.pop(message_id, None)
         finally:
             conn.logout()

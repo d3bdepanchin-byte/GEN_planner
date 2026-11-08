@@ -36,8 +36,19 @@ class AcceptOutcome(str, Enum):
     HINT_SENT = "hint_sent"
 
 
-def _is_autoreply(mail: IncomingMail) -> bool:
+SYSTEM_SENDERS = {"mailer-daemon", "postmaster"}
+
+
+def _is_autoreply(mail: IncomingMail, own_address: str | None = None) -> bool:
+    """Автоответы, отчёты о недоставке и наши собственные письма: отвечать нельзя (петля)."""
     h = {k.lower(): v.strip().lower() for k, v in mail.headers.items()}
+    if h.get("return-path") == "<>" or h.get("content-type", "").startswith("multipart/report"):
+        return True
+    addr = parseaddr(mail.sender)[1].strip().lower()
+    if addr.rpartition("@")[0] in SYSTEM_SENDERS:
+        return True
+    if own_address and addr == parseaddr(own_address)[1].strip().lower():
+        return True
     if h.get("auto-submitted", "no") != "no" or "x-autoreply" in h:
         return True
     if h.get("precedence") in AUTOREPLY_PRECEDENCE:
@@ -67,9 +78,17 @@ def _first_valid(paths: list[Path]) -> tuple[Path, int] | None:
     return None
 
 
-def accept_review_mail(session: Session, mail: IncomingMail, mailer: Mailer) -> AcceptOutcome:
+def accept_review_mail(session: Session, mail: IncomingMail, mailer: Mailer, *,
+                       own_address: str | None = None) -> AcceptOutcome:
+    """Разбирает ответ на файл уточнения и отвечает отправителю.
+
+    own_address — адрес служебного ящика (env.service_mailbox): письма с него игнорируются.
+    Ошибка mailer.send пробрасывается наружу. При APPLIED изменения уже в сессии (flush),
+    поэтому вызывающий обязан откатить сессию и НЕ вызывать mark_done: письмо останется
+    во входящих и будет разобрано заново.
+    """
     mail_key = hashlib.sha256(mail.message_id.encode()).hexdigest()[:8]
-    if _is_autoreply(mail):
+    if _is_autoreply(mail, own_address):
         log.info("письмо %s: автоответ, пропущено", mail_key)
         return AcceptOutcome.IGNORED_AUTOREPLY
     xlsx = [p for p in mail.attachments if p.suffix.lower() == ".xlsx"]

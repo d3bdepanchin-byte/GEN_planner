@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Protocol
 
 
+# Ответ системы всегда помечен как автоматический: два автоответчика не зацикливаются.
+AUTO_HEADERS = {"Auto-Submitted": "auto-replied", "Precedence": "auto_reply"}
+
+
 @dataclass
 class IncomingMail:
     message_id: str
@@ -26,3 +30,5 @@ class ServiceInbox(Protocol):
     def mark_done(self, message_id: str) -> None:
         """Письмо обработано: убрать из входящих (Д-75)."""
         ...
+class MailError(RuntimeError):
+    """Команда почтового сервера не выполнена; письмо осталось на месте."""
