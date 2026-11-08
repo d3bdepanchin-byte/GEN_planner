@@ -76,6 +76,7 @@
 | `config/defaults.toml` | Настройки по умолчанию | 2 |
 | `config/calendar/<год>.toml` | Производственный календарь | 6 |
 | `config/diminutives.toml` | Уменьшительные имена | 5 |
+| `config/masking_stoplist.toml` | Стоп-лист маскирования: бренды и слова, которые не ПДн | 13 |
 | `config/registry_mapping.toml` | Колонки реестра пилота | 7 |
 | `prompts/extract_tasks.v1.md` | Промпт разбора записи | 15 |
 | `src/planerka/settings.py` | Окружение, умолчания, настройки из БД | 2, 3 |

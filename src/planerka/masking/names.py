@@ -1,8 +1,10 @@
 """Имена: леммы natasha, распознаватель имён (NER) и сопоставление со справочником (Д-16, 17)."""
 import re
+import tomllib
 import warnings
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from rapidfuzz.distance import Levenshtein
@@ -12,6 +14,7 @@ from planerka.masking.patterns import Span
 from planerka.settings import get_setting
 
 WORD = re.compile(r'[^\W\d_]+(?:-[^\W\d_]+)*')
+STOPLIST_PATH = Path('config/masking_stoplist.toml')
 
 
 class NameFinder(Protocol):
@@ -217,3 +220,15 @@ def match_employees(text: str, directory: list[EmployeeRef],
         start, end = found[first].start(), found[last].end()
         out.append(EmployeeMatch(Span(start, end, 'EMPLOYEE', text[start:end]), sorted(ids)))
     return sorted(out, key=lambda m: m.span.start)
+
+
+@lru_cache(maxsize=4)
+def load_stoplist(path: Path = STOPLIST_PATH) -> frozenset[str]:
+    """Бренды и слова, которые не ПДн (Д-21, Д-26): их не маскируют NER и проход по граммемам."""
+    with open(path, 'rb') as f:
+        return frozenset(norm_name(w) for w in tomllib.load(f)['words'])
+
+
+def stop_spans(text: str, stoplist: frozenset[str]) -> list[tuple[int, int]]:
+    """Слова текста, у которых сама форма или одна из лемм — в стоп-листе («Макиты»)."""
+    return [(w.start(), w.end()) for w in WORD.finditer(text) if lemmas(w.group()) & stoplist]

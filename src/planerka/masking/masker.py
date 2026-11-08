@@ -1,13 +1,15 @@
 """Замена ПДн токенами. Порядок: контакты, сотрудники, остальные имена (NER и словарь), ИП.
 
-Названия компаний, цены, обороты не маскируются (правило 5, Д-21). Токены вставляются
+Названия компаний, цены, обороты не маскируются (правило 5, Д-21), как и слова из стоп-листа
+config/masking_stoplist.toml (бренды) — кроме имён сотрудников. Токены вставляются
 как есть, без склонения: «со [P1]». Логов и текста в исключениях здесь нет.
 """
 import re
 from dataclasses import dataclass, field
 
 from planerka.core.directory import EmployeeRef
-from planerka.masking.names import WORD, NameFinder, SurnameEdits, match_employees, person_like
+from planerka.masking.names import (WORD, NameFinder, SurnameEdits, load_stoplist,
+                                    match_employees, person_like, stop_spans)
 from planerka.masking.patterns import find_contacts
 from planerka.masking.tokens import TokenStore, token_number
 
@@ -24,6 +26,11 @@ _TITLE = re.compile(r'[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?')
 _IP_MAX_WORDS = 3  # фамилия, имя, отчество
 # Служебные слова после «ип» — не фамилия: «ип и ооо».
 _NOT_SURNAME = frozenset('и или а но по на в во с со от до для у к о об не это тоже же как'.split())
+
+
+def company_spans(text: str) -> list[tuple[int, int]]:
+    """Названия компаний с организационно-правовой формой: не ПДн (Д-21)."""
+    return [(m.start(), m.end()) for m in _COMPANY.finditer(text)]
 
 
 def _ip_names(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
@@ -135,9 +142,9 @@ class Masker:
                                                                              result)))
 
         covered = [(r.start, r.end) for r in repl]
-        companies = [(m.start(), m.end()) for m in _COMPANY.finditer(text)]
         ip_names, ip_prefixes = _ip_names(text)
-        keep = covered + companies + ip_prefixes
+        # Сотрудники уже в covered: стоп-лист их не скрывает.
+        keep = covered + company_spans(text) + ip_prefixes + stop_spans(text, load_stoplist())
         parts = [u for s in self.names.find(text) for u in _uncovered(s.start, s.end, keep)]
         # Запасной проход после NER: natasha не видит имён в тексте без заглавных.
         parts += [u for w in WORD.finditer(text) if person_like(w.group())

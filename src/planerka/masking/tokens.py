@@ -15,6 +15,8 @@ from planerka.masking.patterns import normalize_contact
 EMPLOYEE, EXTERNAL = 'employee', 'external'
 CONTACT_KINDS = ('TEL', 'EMAIL', 'INN')
 _TOKEN = re.compile(r'\[([A-Z]+)(\d+)\]')
+# Токен в тексте, в том числе с кандидатами: [P1], [P1|P3], [X1], [TEL1], [EMAIL1], [INN1].
+TOKEN_IN_TEXT = re.compile(r'\[[A-Z]+\d+(?:\|[A-Z]+\d+)*\]')
 
 
 def token_number(token: str) -> int:
