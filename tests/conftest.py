@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from planerka.core.numbering import next_task_number
@@ -62,3 +62,9 @@ def task(session):
     session.add(t)
     session.flush()
     return t
+
+
+@pytest.fixture
+def fresh_sequence(session):
+    """Последовательность номеров с нуля (ALTER откатывается вместе с тестом)."""
+    session.execute(text("ALTER SEQUENCE task_number_seq RESTART WITH 1"))

@@ -34,19 +34,32 @@ def test_rejected_candidate_number_not_returned(session, task):
     assert next_task_number(session) > n
 
 
-def test_sequence_continues_after_pilot(session):
+def test_sequence_continues_after_pilot(session, fresh_sequence):
     set_sequence_after(session, 72)
     assert next_task_number(session) == 73
 
 
-def test_start_setting_moves_sequence_up(session):
-    set_sequence_after(session, 0)
+def test_start_setting_moves_sequence_up(session, fresh_sequence):
     set_setting(session, 'registry.task_number_start', 500, 'test')
     assert next_task_number(session) == 500
     assert next_task_number(session) == 501
 
 
-def test_start_setting_never_moves_sequence_back(session):
+def test_start_setting_never_moves_sequence_back(session, fresh_sequence):
     set_sequence_after(session, 900)
     set_setting(session, 'registry.task_number_start', 500, 'test')
     assert next_task_number(session) == 901
+
+
+def test_set_sequence_after_never_moves_back(session, fresh_sequence):
+    set_sequence_after(session, 72)
+    for _ in range(8):  # И-073..И-080
+        next_task_number(session)
+    set_sequence_after(session, 72)  # повторный импорт пилота
+    assert next_task_number(session) == 81
+
+
+def test_set_sequence_after_zero_is_noop(session, fresh_sequence):
+    set_sequence_after(session, 5)
+    set_sequence_after(session, 0)
+    assert next_task_number(session) == 6
