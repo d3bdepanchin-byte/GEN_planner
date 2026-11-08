@@ -6,7 +6,14 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from planerka.core.directory import norm_name
+from planerka.core.numbering import parse_number
+from planerka.db.models import Employee
 
 META_SHEET = "meta"
 NOT_FROM_SYSTEM = "файл не из системы или повреждён"
@@ -75,3 +82,47 @@ def parse_date(value) -> date | None:
         raise ValueError(text)
     d, mo, y = (int(g) for g in m.groups())
     return date(y, mo, d)
+
+
+def cell_number(value) -> int | None:
+    """Номер задачи: И-007, 7 или 7.0. Пусто -> None, нечитаемое -> ValueError."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    text = cell_text(value)
+    if text is None:
+        return None
+    return int(text) if text.isdigit() else parse_number(text)
+
+
+def employee_index(session: Session) -> tuple[dict[int, str], dict[str, int | None]]:
+    """id -> ФИО и ключ имени -> id (None, если одно имя у двоих)."""
+    names = {e.id: e.full_name for e in session.scalars(select(Employee))}
+    by_name: dict[str, int | None] = {}
+    for eid, full_name in names.items():
+        key = norm_name(full_name)
+        by_name[key] = None if key in by_name else eid
+    return names, by_name
+
+
+def add_list_validation(ws: Worksheet, cells: str, options: list[str]) -> None:
+    dv = DataValidation(type="list", formula1='"' + ",".join(options) + '"', allow_blank=True)
+    dv.add(cells)
+    ws.add_data_validation(dv)
+
+
+def add_employee_dropdown(wb: Workbook, ws: Worksheet, session: Session, cells: str,
+                          sheet_name: str) -> None:
+    """Скрытый лист со всеми ФИО и выпадающий список по нему; имя вне списка отсечёт приём."""
+    names = list(session.scalars(select(Employee.full_name).order_by(Employee.full_name)))
+    lst = wb.create_sheet(sheet_name)
+    for n in names:
+        lst.append([n])
+    lst.sheet_state = "hidden"
+    if names:
+        dv = DataValidation(
+            type="list", formula1=f"='{sheet_name}'!$A$1:$A${len(names)}", allow_blank=True)
+        dv.showErrorMessage = False
+        dv.add(cells)
+        ws.add_data_validation(dv)

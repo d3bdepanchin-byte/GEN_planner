@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import openpyxl
@@ -11,6 +11,7 @@ from planerka.mail.accept import AcceptOutcome, accept_review_mail
 from planerka.mail.base import IncomingMail
 from planerka.mail.fake import FakeInbox, FakeMailer
 from planerka.review.executor import build_executor_file
+from planerka.review.owner import build_owner_file
 
 ADDR = 'smirnov@example.test'
 
@@ -159,12 +160,48 @@ def test_first_valid_xlsx_used(session, mailer, review, review_tasks, tmp_path):
     assert accept_review_mail(session, mail, mailer) == AcceptOutcome.APPLIED
 
 
-def test_owner_file_treated_as_unknown(session, mailer, review):
-    review.kind = 'owner'  # TODO Task 18: приём файла владельца реестра
+OWNER_ADDR = 'kuznetsova@example.test'
+
+
+@pytest.fixture
+def owner_review(session, employees, smirnov, tmp_path):
+    employees[1].email = OWNER_ADDR
+    t1 = Task(number=next_task_number(session), title='Первая', type='поручение', owner_id=smirnov.id,
+              questions=[], flags=[], status=TaskStatus.CONFIRMED_BY_EXECUTOR.value)
+    t2 = Task(number=next_task_number(session), title='Вторая', type='поручение', owner_id=smirnov.id,
+              questions=[], flags=[], status=TaskStatus.CONFIRMED_BY_EXECUTOR.value)
+    session.add_all([t1, t2])
     session.flush()
-    mail = make_mail([fill(review.path)])
-    assert accept_review_mail(session, mail, mailer) == AcceptOutcome.HINT_SENT
-    assert 'не из системы' in mailer.sent[-1]['body']
+    return build_owner_file(session, employees[1], tmp_path / 'own', datetime(2026, 11, 9))
+
+
+def fill_owner(path, decisions):
+    wb = openpyxl.load_workbook(path)
+    ws = wb['Задачи']
+    head = {c.value: c.column for c in ws[1]}
+    for r, d in zip(range(2, ws.max_row + 1), decisions):
+        ws.cell(r, head['Решение']).value = d
+    wb.save(path)
+    return Path(path)
+
+
+def test_owner_file_applied_with_counts(session, mailer, owner_review):
+    mail = make_mail([fill_owner(owner_review.path, ['утверждаю', 'отклоняю'])], sender=OWNER_ADDR)
+    assert accept_review_mail(session, mail, mailer) == AcceptOutcome.APPLIED
+    assert mailer.sent[-1]['body'] == 'Принято: утверждено 1, отклонено 1.'
+    assert owner_review.returned_at is not None
+
+
+def test_owner_file_from_other_sender_rejected(session, mailer, owner_review):
+    mail = make_mail([fill_owner(owner_review.path, ['утверждаю', 'утверждаю'])])  # адрес Смирнова
+    assert accept_review_mail(session, mail, mailer) == AcceptOutcome.REJECTED_SENDER
+    assert owner_review.returned_at is None
+
+
+def test_owner_file_errors_sent(session, mailer, owner_review):
+    mail = make_mail([fill_owner(owner_review.path, ['утверждаю'])], sender=OWNER_ADDR)
+    assert accept_review_mail(session, mail, mailer) == AcceptOutcome.ERRORS_SENT
+    assert 'не выбрано решение' in mailer.sent[-1]['body']
 
 
 def test_errors_sent_as_numbered_list(session, mailer, review, review_tasks):

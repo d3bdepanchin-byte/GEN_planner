@@ -5,16 +5,16 @@ from enum import Enum
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from planerka.core.directory import norm_name
-from planerka.core.numbering import format_number, parse_number
+from planerka.core.numbering import format_number
 from planerka.core.statuses import TaskStatus, transition
 from planerka.db.models import Employee, History, ReviewFile, Task
 from planerka.review.xlsx import (
-    NOT_FROM_SYSTEM, cell_text, parse_date, read_meta, style_sheet, write_meta,
+    NOT_FROM_SYSTEM, add_employee_dropdown, add_list_validation, cell_number, cell_text,
+    employee_index, parse_date, read_meta, style_sheet, write_meta,
 )
 
 __all__ = ["read_meta", "ReviewDecision", "normalize_decision", "build_executor_file",
@@ -85,6 +85,8 @@ class ReviewErrors:
 class ApplyReport:
     confirmed: int = 0
     to_owner: int = 0
+    approved: int = 0  # файл владельца реестра
+    rejected: int = 0
     skipped: int = 0  # строки, по которым решение уже применено (повторный возврат файла)
 
 
@@ -118,23 +120,9 @@ def build_executor_file(session: Session, employee: Employee, tasks: list[Task],
             ws.cell(r, c).number_format = DATE_FORMAT
     style_sheet(ws, WIDTHS, WRAP_COLS)
 
-    decisions = DataValidation(
-        type="list", formula1='"' + ",".join(d.value for d in ReviewDecision) + '"',
-        allow_blank=True)
-    decisions.add(f"J2:J{last}")
-    ws.add_data_validation(decisions)
+    add_list_validation(ws, f"J2:J{last}", [d.value for d in ReviewDecision])
 
-    names = list(session.scalars(select(Employee.full_name).order_by(Employee.full_name)))
-    lst = wb.create_sheet(EMPLOYEES_SHEET)
-    for n in names:
-        lst.append([n])
-    lst.sheet_state = "hidden"
-    if names:
-        owners = DataValidation(
-            type="list", formula1=f"='{EMPLOYEES_SHEET}'!$A$1:$A${len(names)}", allow_blank=True)
-        owners.showErrorMessage = False  # имя вне списка отсечёт приём файла
-        owners.add(f"M2:M{last}")
-        ws.add_data_validation(owners)
+    add_employee_dropdown(wb, ws, session, f"M2:M{last}", EMPLOYEES_SHEET)
 
     how = wb.create_sheet(HOWTO_SHEET)
     how.column_dimensions["A"].width = 110
@@ -148,17 +136,6 @@ def build_executor_file(session: Session, employee: Employee, tasks: list[Task],
     review.path = str(path)
     session.flush()
     return review
-
-
-def _number(value) -> int | None:
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    text = cell_text(value)
-    if text is None:
-        return None
-    return int(text) if text.isdigit() else parse_number(text)
 
 
 def parse_executor_file(path: Path) -> ParsedReview | ReviewErrors:
@@ -188,7 +165,7 @@ def parse_executor_file(path: Path) -> ParsedReview | ReviewErrors:
         if cell_text(raw_number) is None:
             continue
         try:
-            number = _number(raw_number)
+            number = cell_number(raw_number)
         except ValueError:
             errors.append(f"строка {r}: не удалось прочитать номер «{cell_text(raw_number)}»")
             continue
@@ -257,11 +234,7 @@ def apply_executor_review(session: Session, review: ReviewFile, parsed: ParsedRe
     now = now or datetime.now(timezone.utc)
     if parsed.review_id != review.id:
         raise ReviewRejected(ReviewErrors([NOT_FROM_SYSTEM]))
-    names = {e.id: e.full_name for e in session.scalars(select(Employee))}
-    by_name: dict[str, int | None] = {}
-    for eid, full_name in names.items():
-        key = norm_name(full_name)
-        by_name[key] = None if key in by_name else eid  # None — двое с одним именем
+    names, by_name = employee_index(session)
     errors: list[str] = []
     owners: dict[int, int] = {}
     for row in parsed.rows:

@@ -13,6 +13,7 @@ from planerka.mail.base import IncomingMail, Mailer
 from planerka.review.executor import (
     ParsedReview, ReviewErrors, ReviewRejected, apply_executor_review, parse_executor_file,
 )
+from planerka.review.owner import apply_owner_review, parse_owner_file
 from planerka.review.xlsx import MetaError, NOT_FROM_SYSTEM, read_meta
 
 log = logging.getLogger(__name__)
@@ -97,8 +98,7 @@ def accept_review_mail(session: Session, mail: IncomingMail, mailer: Mailer, *,
         return AcceptOutcome.HINT_SENT
     found = _first_valid(xlsx)
     review = session.get(ReviewFile, found[1]) if found else None
-    if found is None or review is None or review.kind != "executor":
-        # TODO Задача 18: файл владельца реестра (kind 'owner') принимается отдельно.
+    if found is None or review is None or review.kind not in ("executor", "owner"):
         _reply(mailer, mail, HINT_NOT_FROM_SYSTEM)
         return AcceptOutcome.HINT_SENT
     path = found[0]
@@ -110,15 +110,25 @@ def accept_review_mail(session: Session, mail: IncomingMail, mailer: Mailer, *,
         log.info("письмо %s: отправитель не адресат файла %d", mail_key, review.id)
         return AcceptOutcome.REJECTED_SENDER
 
-    parsed = parse_executor_file(path)
+    is_owner = review.kind == "owner"
+    parsed = parse_owner_file(path) if is_owner else parse_executor_file(path)
     if isinstance(parsed, ReviewErrors):
         _reply(mailer, mail, _numbered(parsed.lines))
         return AcceptOutcome.ERRORS_SENT
     try:
-        report = apply_executor_review(session, review, parsed)
+        report = (apply_owner_review if is_owner else apply_executor_review)(
+            session, review, parsed)
     except ReviewRejected as rejected:
         _reply(mailer, mail, _numbered(rejected.errors.lines))
         return AcceptOutcome.ERRORS_SENT
+    if is_owner:
+        body = f"Принято: утверждено {report.approved}, отклонено {report.rejected}."
+        if report.skipped:
+            body += f" Строк, обработанных ранее: {report.skipped}."
+        _reply(mailer, mail, body)
+        log.info("письмо %s: файл владельца %d принят, утверждено %d, отклонено %d", mail_key,
+                 review.id, report.approved, report.rejected)
+        return AcceptOutcome.APPLIED
     body = f"Принято: подтверждено {report.confirmed}, передано владельцу реестра {report.to_owner}."
     if report.skipped:
         body += f" Строк, обработанных ранее: {report.skipped}."
