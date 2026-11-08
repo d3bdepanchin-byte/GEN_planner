@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Protocol
 
-from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 
 from planerka.core.directory import EmployeeRef, norm_name
 from planerka.masking.patterns import Span
+from planerka.settings import get_setting
 
 WORD = re.compile(r'[^\W\d_]+(?:-[^\W\d_]+)*')
 
@@ -61,6 +62,70 @@ def lemma(word: str) -> str:
     return norm_name(forms[0].normal if forms else word)
 
 
+_PERSON_GRAMMEMES = ('Name', 'Surn', 'Patr')
+
+
+@lru_cache(maxsize=100_000)
+def person_like(word: str) -> bool:
+    """Самый вероятный разбор (или один из равных) — имя, фамилия, отчество («петренко», «ира»)."""
+    parses = _morph().parse(word)
+    if len(word) <= 4 and (word.isupper() or any('Abbr' in p.tag for p in parses)):
+        return False  # аббревиатуры: «ИНН», «инн» разбираются как «Инна»
+    top = [p for p in parses if p.score >= parses[0].score] if parses else []
+    return any(g in p.tag for p in top for g in _PERSON_GRAMMEMES)  # при равных — любой
+
+
+@lru_cache(maxsize=100_000)
+def _common_lowercase(word: str) -> bool:
+    """Строчное словарное слово, у которого нет разбора как имени: «смирно», «белое»."""
+    parses = _morph().parse(word)
+    return (word == word.lower() and any(p.is_known for p in parses)
+            and not any(g in p.tag for p in parses for g in _PERSON_GRAMMEMES))
+
+
+@dataclass(frozen=True)
+class SurnameEdits:
+    """Допуск правок (расстояние Левенштейна) в фамилии: распознавание искажает фамилии (Д-26).
+
+    Фамилия короче short_from — только точное совпадение леммы.
+    """
+    max_short: int
+    max_long: int
+    short_from: int
+    long_from: int
+
+    @classmethod
+    def from_settings(cls, session) -> 'SurnameEdits':
+        return cls(max_short=get_setting(session, 'masking.surname_max_edits_short'),
+                   max_long=get_setting(session, 'masking.surname_max_edits_long'),
+                   short_from=get_setting(session, 'masking.surname_short_from'),
+                   long_from=get_setting(session, 'masking.surname_long_from'))
+
+    def allowed(self, surname: str) -> int:
+        if len(surname) < self.short_from:
+            return 0
+        return self.max_long if len(surname) >= self.long_from else self.max_short
+
+
+# Окончания падежей фамилий и прилагательных: «Смирнавым» → основа «смирнав».
+_ENDINGS = ('ыми', 'ими', 'ого', 'его', 'ому', 'ему', 'ым', 'им', 'ой', 'ей', 'ом', 'ем',
+            'ую', 'ых', 'их', 'а', 'у', 'е', 'ы', 'ю', 'я')
+
+
+def _phonetic(form: str) -> str:
+    """Типичные искажения распознавания: «тс» вместо «ц», удвоенные буквы («Смирнофф»)."""
+    return re.sub(r'(.)\1+', r'\1', form.replace('тс', 'ц'))
+
+
+@lru_cache(maxsize=100_000)
+def _surname_forms(word: str) -> frozenset[str]:
+    """Леммы и основы без падежного окончания, после фонетической нормализации."""
+    forms = set(lemmas(word))
+    w = norm_name(word)
+    forms.update(w[:-len(e)] for e in _ENDINGS if w.endswith(e) and len(w) - len(e) >= 3)
+    return frozenset(_phonetic(f) for f in forms)
+
+
 @dataclass(frozen=True)
 class EmployeeMatch:
     span: Span
@@ -78,14 +143,18 @@ class _Candidate:
 _VKey = tuple[str, bool]  # слово варианта и признак «это фамилия сотрудника»
 
 
-def _word_score(word: str, vword: str, is_surname: bool, threshold: int) -> float:
-    a, b = lemmas(word), lemmas(vword)
-    if a & b:
+def _word_score(word: str, vword: str, is_surname: bool, edits: SurnameEdits) -> float:
+    """100 — точная лемма; для фамилии 100 минус число правок в пределах допуска; иначе 0."""
+    if lemmas(word) & lemmas(vword):
         return 100.0
-    if not is_surname:  # имена и уменьшительные — только точная лемма
+    if not is_surname or _common_lowercase(word):  # имена и уменьшительные — только точно
         return 0.0
-    best = max(fuzz.ratio(x, y) for x in a for y in b)
-    return best if best >= threshold else 0.0
+    limit = edits.allowed(norm_name(vword))
+    if not limit or len(word) < edits.short_from - limit:  # «по» не искажённый «Попов»
+        return 0.0
+    best = min(Levenshtein.distance(x, y, score_cutoff=limit)
+               for x in _surname_forms(word) for y in _surname_forms(vword))
+    return 100.0 - best if best <= limit else 0.0
 
 
 def _variant_keys(emp: EmployeeRef) -> set[tuple[_VKey, ...]]:
@@ -96,7 +165,7 @@ def _variant_keys(emp: EmployeeRef) -> set[tuple[_VKey, ...]]:
 
 
 def _candidates(words: list[str], directory: list[EmployeeRef],
-                threshold: int) -> list[_Candidate]:
+                edits: SurnameEdits) -> list[_Candidate]:
     variants = {emp.id: _variant_keys(emp) for emp in directory}
     vkeys = {k for vs in variants.values() for v in vs for k in v}
     # Каждое различное слово текста сравниваем с каждым словом вариантов один раз.
@@ -105,7 +174,7 @@ def _candidates(words: list[str], directory: list[EmployeeRef],
     for i, word in enumerate(words):
         if word not in scores:
             scores[word] = {k: sc for k in vkeys
-                            if (sc := _word_score(word, k[0], k[1], threshold))}
+                            if (sc := _word_score(word, k[0], k[1], edits))}
         for k in scores[word]:
             positions.setdefault(k, []).append(i)
     out = []
@@ -122,14 +191,14 @@ def _candidates(words: list[str], directory: list[EmployeeRef],
 
 
 def match_employees(text: str, directory: list[EmployeeRef],
-                    threshold: int) -> list[EmployeeMatch]:
+                    edits: SurnameEdits) -> list[EmployeeMatch]:
     """Упоминания сотрудников по вариантам имён.
 
     Длинный вариант («Александр Смирнов») важнее одиночных слов; на одном спане
     остаются все сотрудники с равным лучшим баллом — неоднозначность не разрешаем.
     """
     found = list(WORD.finditer(text))
-    cands = _candidates([m.group() for m in found], directory, threshold)
+    cands = _candidates([m.group() for m in found], directory, edits)
     best: dict[tuple[int, int], tuple[float, set[int]]] = {}
     for c in cands:
         key = (c.first, c.last)

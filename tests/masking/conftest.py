@@ -3,9 +3,8 @@ import pytest
 from planerka.core.directory import load_diminutives, load_directory, name_variants
 from planerka.db.models import Employee, Source
 from planerka.masking.masker import Masker
-from planerka.masking.names import NatashaNameFinder
+from planerka.masking.names import NatashaNameFinder, SurnameEdits
 from planerka.masking.tokens import TokenStore
-from planerka.settings import get_setting
 
 # Синтетический справочник: порядок задаёт постоянные токены P1, P2, P3.
 EMPLOYEES = ['Смирнов Александр', 'Кузнецова Ольга', 'Попов Александр']
@@ -50,4 +49,4 @@ def tokens(session, sources, employees):
 
 @pytest.fixture
 def masker(session, directory, tokens, names):
-    return Masker(directory, tokens, names, get_setting(session, 'masking.fuzzy_threshold'))
+    return Masker(directory, tokens, names, SurnameEdits.from_settings(session))

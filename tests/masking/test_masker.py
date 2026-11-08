@@ -1,6 +1,7 @@
-from planerka.masking.names import lemma
+from planerka.masking.names import SurnameEdits, lemma, match_employees
 from planerka.masking.patterns import find_contacts
-from planerka.masking.names import match_employees
+
+EDITS = SurnameEdits(max_short=1, max_long=2, short_from=5, long_from=9)
 
 
 # --- тесты из брифа ---
@@ -47,7 +48,10 @@ def _kinds(text):
 
 def test_phone_formats():
     for phone in ['+7 913 000-00-00', '8 (913) 000-00-00', '+7(913)0000000',
-                  '8-913-000-00-00', '89130000000', '+79130000000', '913 000-00-00']:
+                  '8-913-000-00-00', '89130000000', '+79130000000', '913 000-00-00',
+                  '7 913 000-00-00', '79130000000', '9130000000', '7 (913) 000 00 00',
+                  '8 (3852) 50-00-00', '+7 3852 50-00-00', '50-00-00', '8 913 000 0000',
+                  '8 800 000-00-00']:
         assert _kinds(f'звони {phone} завтра') == [('TEL', phone)], phone
 
 
@@ -55,11 +59,18 @@ def test_email_and_inn():
     assert _kinds('пиши на ivan.petrov@example.test') == [('EMAIL', 'ivan.petrov@example.test')]
     assert _kinds('ИНН 2200000000') == [('INN', '2200000000')]
     assert _kinds('инн: 220000000000.') == [('INN', '220000000000')]
+    assert _kinds('ИНН — 220000000000') == [('INN', '220000000000')]
+    assert _kinds('ИНН клиента 220000000000') == [('INN', '220000000000')]
+    assert _kinds('его ИНН 2200-0000-0000') == [('INN', '2200-0000-0000')]
+    assert _kinds('инн 22 00 00 00 00') == [('INN', '22 00 00 00 00')]
 
 
 def test_bare_numbers_and_prices_not_contacts():
     assert find_contacts('номер 220000000000 и оборот 1200000000') == []
     assert find_contacts('цена 1 200 000, оборот 12 500 000 000 руб.') == []
+    assert find_contacts('цена 1 200 000 рублей, дата 05.11.2026, оборот 12 500 000') == []
+    assert find_contacts('счёт 40702810000000000000 от 05.11.2026') == []
+    assert find_contacts('оборот 8 500 000 000 и 7 500 000 руб.') == []
 
 
 def test_same_contact_same_token_in_source(masker):
@@ -69,6 +80,7 @@ def test_same_contact_same_token_in_source(masker):
 
 def test_inn_prefix_kept(masker):
     assert masker.mask('ИНН 2200000000', 1).text == 'ИНН [INN1]'
+    assert masker.mask('инн 22 00 00 00 00', 2).text == 'инн [INN1]'
 
 
 # --- сотрудники ---
@@ -78,13 +90,13 @@ def test_lemma_of_inflected_surname():
 
 
 def test_multiword_variant_is_one_match(directory):
-    m = match_employees('Александр Смирнов придёт', directory, 88)
+    m = match_employees('Александр Смирнов придёт', directory, EDITS)
     assert [(x.span.text, len(x.employee_ids)) for x in m] == [('Александр Смирнов', 1)]
 
 
 def test_ambiguous_match_lists_all_candidates(directory):
     smirnov, popov = directory[0].id, directory[2].id
-    m = match_employees('Сашей', directory, 88)
+    m = match_employees('Сашей', directory, EDITS)
     assert len(m) == 1 and sorted(m[0].employee_ids) == sorted([smirnov, popov])
 
 
@@ -92,8 +104,26 @@ def test_distorted_surname_matched_fuzzy(masker):
     assert masker.mask('Кузницова пришлёт отчёт', 1).text == '[P2] пришлёт отчёт'
 
 
+def test_distorted_surnames_short_and_inflected(masker):
+    assert masker.mask('Смирнав пришлёт', 1).text == '[P1] пришлёт'
+    assert masker.mask('договорились со Смирнавым', 1).text == 'договорились со [P1]'
+    assert masker.mask('Смерновым договорились', 1).text == '[P1] договорились'
+    assert masker.mask('Попав сделает', 1).text == '[P3] сделает'
+    assert masker.mask('Кузнитсова пришлёт', 1).text == '[P2] пришлёт'
+    assert masker.mask('Смирнофф пришлёт', 1).text == '[P1] пришлёт'
+    assert masker.mask('смирнав пришлёт', 1).text == '[P1] пришлёт'
+
+
+def test_surname_edits_from_settings(session):
+    assert SurnameEdits.from_settings(session) == EDITS
+
+
+def test_lowercase_dictionary_word_not_fuzzy(masker):
+    assert masker.mask('сидеть смирно', 1).text == 'сидеть смирно'
+
+
 def test_first_names_not_fuzzy(directory):
-    assert match_employees('Олга', directory, 88) == []
+    assert match_employees('Олга', directory, EDITS) == []
 
 
 def test_ambiguous_reported(masker, directory):
@@ -124,6 +154,23 @@ def test_ip_with_initials(masker):
 def test_ip_lowercase_asr_output(masker):
     assert masker.mask('ип волков по цене 500 000', 1).text == 'ип [X1] по цене 500 000'
     assert masker.mask('ип и ооо', 1).text == 'ип и ооо'
+
+
+def test_lowercase_people_masked(masker):
+    assert masker.mask('звонил клиент петренко игорь', 1).text == 'звонил клиент [X1]'
+    assert masker.mask('клиент марина белова просила скидку', 2).text == 'клиент [X1] просила скидку'
+    assert masker.mask('у петренко долг 300 000', 3).text == 'у [X1] долг 300 000'
+    assert masker.mask('перезвонить сидорову ивану завтра', 4).text == 'перезвонить [X1] завтра'
+    assert masker.mask('ира из бухгалтерии звонила', 5).text == '[X1] из бухгалтерии звонила'
+
+
+def test_ip_lowercase_full_name(masker):
+    assert masker.mask('ип волкова анна сергеевна', 1).text == 'ип [X1]'
+    assert masker.mask('ип анна волкова', 2).text == 'ип [X1]'
+
+
+def test_ip_initials_before_surname(masker):
+    assert masker.mask('ИП А.С. Волков', 1).text == 'ИП [X1]'
 
 
 def test_company_name_with_surname_kept(masker):

@@ -1,4 +1,4 @@
-"""Замена ПДн токенами. Порядок: контакты, сотрудники, остальные имена (NER), ИП.
+"""Замена ПДн токенами. Порядок: контакты, сотрудники, остальные имена (NER и словарь), ИП.
 
 Названия компаний, цены, обороты не маскируются (правило 5, Д-21). Токены вставляются
 как есть, без склонения: «со [P1]». Логов и текста в исключениях здесь нет.
@@ -7,24 +7,50 @@ import re
 from dataclasses import dataclass, field
 
 from planerka.core.directory import EmployeeRef
-from planerka.masking.names import NameFinder, match_employees
-from planerka.masking.patterns import Span, find_contacts
+from planerka.masking.names import WORD, NameFinder, SurnameEdits, match_employees, person_like
+from planerka.masking.patterns import find_contacts
 from planerka.masking.tokens import TokenStore, token_number
 
 # Название компании с организационно-правовой формой в кавычках: имена внутри — часть названия.
 _COMPANY = re.compile(r'(?<![^\W\d_])(?:ООО|ОАО|ЗАО|ПАО|АО|НАО|ТОО)\s*[«"„“][^»"“”\n]*[»"“”]')
 
-_NAME = r'[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?'
-_INITIALS = r'[А-ЯЁ]\.\s*(?:[А-ЯЁ]\.)?'
-# «ИП Волков», «ИП Волков И. П.», «ИП Волков Игорь Петрович», «ИП И. П. Волков».
-# Распознавание может выдать текст без заглавных: «ип волков» — фамилия в любом регистре.
-_IP = re.compile(
-    r'(?<![^\W\d_])(?i:ИП|индивидуальн(?:ый|ого|ому|ым|ом) предпринимател[ьяюем]{0,2})\s+[«"]?'
-    rf'((?:{_INITIALS}\s*)?(?P<surname>[А-ЯЁа-яё][а-яё]+(?:-[А-ЯЁа-яё][а-яё]+)?)'
-    rf'(?:\s+{_INITIALS}|\s+{_NAME}(?:\s+{_NAME})?)?)'
-)
+# «ИП Волков», «ИП Волков И. П.», «ИП А.С. Волков», «ип волкова анна сергеевна».
+_IP_PREFIX = re.compile(
+    r'(?<![^\W\d_])(?i:ИП|индивидуальн(?:ый|ого|ому|ым|ом)\s+предпринимател[ьяюем]{0,2})'
+    r'\s+[«"]?')
+_IP_PART = re.compile(
+    r'\s*(?:(?P<init>[А-ЯЁ]\.\s*(?:[А-ЯЁ]\.)?)|(?P<word>[^\W\d_]+(?:-[^\W\d_]+)*))')
+_TITLE = re.compile(r'[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?')
+_IP_MAX_WORDS = 3  # фамилия, имя, отчество
 # Служебные слова после «ип» — не фамилия: «ип и ооо».
 _NOT_SURNAME = frozenset('и или а но по на в во с со от до для у к о об не это тоже же как'.split())
+
+
+def _ip_names(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Имена ИП и сами слова «ИП» (их не маскируем).
+
+    Первое слово после «ИП» — фамилия в любом регистре (распознавание может не ставить
+    заглавные); следующие — инициалы, слова с заглавной или имена, фамилии, отчества
+    по словарю.
+    """
+    names, prefixes = [], []
+    for m in _IP_PREFIX.finditer(text):
+        prefixes.append((m.start(), m.end()))
+        pos, start, words = m.end(), None, 0
+        while (p := _IP_PART.match(text, pos)) is not None:
+            word = p['word']
+            if word is not None:
+                ok = (word.casefold() not in _NOT_SURNAME if words == 0
+                      else _TITLE.fullmatch(word) is not None or person_like(word))
+                if not ok or words == _IP_MAX_WORDS:
+                    break
+                words += 1
+            if start is None:
+                start = p.start('word') if word is not None else p.start('init')
+            pos = p.end()
+        if words:
+            names.append((start, pos))
+    return names, prefixes
 
 
 @dataclass
@@ -45,9 +71,10 @@ def _overlaps(start: int, end: int, taken: list[_Repl]) -> bool:
     return any(start < r.end and r.start < end for r in taken)
 
 
-def _uncovered(span: Span, covered: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Части спана вне уже занятых участков."""
-    parts = [(span.start, span.end)]
+def _uncovered(start: int, end: int,
+               covered: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Части участка вне уже занятых."""
+    parts = [(start, end)]
     for c_start, c_end in covered:
         nxt = []
         for s, e in parts:
@@ -88,11 +115,11 @@ def _merge(text: str, parts: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 class Masker:
     def __init__(self, directory: list[EmployeeRef], tokens: TokenStore, names: NameFinder,
-                 threshold: int) -> None:
+                 edits: SurnameEdits) -> None:
         self.directory = directory
         self.tokens = tokens
         self.names = names
-        self.threshold = threshold
+        self.edits = edits
 
     def mask(self, text: str, source_id: int) -> MaskResult:
         result = MaskResult(text)
@@ -101,7 +128,7 @@ class Masker:
         for s in find_contacts(text):
             repl.append(_Repl(s.start, s.end, self.tokens.contact(source_id, s.kind, s.text)))
 
-        for m in match_employees(text, self.directory, self.threshold):
+        for m in match_employees(text, self.directory, self.edits):
             if _overlaps(m.span.start, m.span.end, repl):
                 continue
             repl.append(_Repl(m.span.start, m.span.end, self._employee_token(m.employee_ids,
@@ -109,9 +136,13 @@ class Masker:
 
         covered = [(r.start, r.end) for r in repl]
         companies = [(m.start(), m.end()) for m in _COMPANY.finditer(text)]
-        parts = [u for s in self.names.find(text) for u in _uncovered(s, covered + companies)]
-        parts += [u for m in _IP.finditer(text) if m['surname'].casefold() not in _NOT_SURNAME
-                  for u in _uncovered(Span(m.start(1), m.end(1), 'IP', m.group(1)), covered)]
+        ip_names, ip_prefixes = _ip_names(text)
+        keep = covered + companies + ip_prefixes
+        parts = [u for s in self.names.find(text) for u in _uncovered(s.start, s.end, keep)]
+        # Запасной проход после NER: natasha не видит имён в тексте без заглавных.
+        parts += [u for w in WORD.finditer(text) if person_like(w.group())
+                  for u in _uncovered(w.start(), w.end(), keep)]
+        parts += [u for s, e in ip_names for u in _uncovered(s, e, covered + ip_prefixes)]
         for start, end in _merge(text, parts):
             repl.append(_Repl(start, end, self.tokens.external(source_id, text[start:end])))
 

@@ -19,7 +19,10 @@ overnight_window_hours = 14  # старт (Д-82)
 meeting_hours_max = 2  # старт
 
 [masking]
-fuzzy_threshold = 88  # старт
+surname_short_from = 5  # старт: фамилия короче — только точное совпадение
+surname_max_edits_short = 1  # старт: правок в фамилии длиной от short_from до long_from - 1
+surname_long_from = 9  # старт
+surname_max_edits_long = 2  # старт
 
 [llm]
 model_extract = "claude-sonnet-5-5"  # старт; сверено с данными среды Claude Code 08.11.2026
