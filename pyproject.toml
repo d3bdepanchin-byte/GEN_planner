@@ -19,6 +19,9 @@ dependencies = [
     "jiwer",
 ]
 
+[project.scripts]
+planerka = "planerka.cli:main"
+
 [project.optional-dependencies]
 # Распознавание речи: тяжёлые пакеты (torch), на сервере ставятся по умолчанию.
 # gigaam ставится из git по README репозитория salute-developers/GigaAM.

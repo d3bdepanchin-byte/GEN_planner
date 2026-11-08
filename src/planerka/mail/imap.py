@@ -100,14 +100,20 @@ class ImapServiceInbox:
             _, data = conn.uid("SEARCH", None, "ALL")
             result: list[IncomingMail] = []
             for uid in (data[0] or b"").split():
-                _, parts = conn.uid("FETCH", uid, "(BODY.PEEK[])")
-                raw = next((p[1] for p in parts if isinstance(p, tuple)), None)
+                label = uid.decode(errors="replace")
+                try:
+                    _, parts = conn.uid("FETCH", uid, "(BODY.PEEK[])")
+                except imaplib.IMAP4.error as exc:  # сбой на одном письме — остальные читаем
+                    log.warning("письмо UID %s не получено: %s", label, type(exc).__name__)
+                    continue
+                raw = next((p[1] for p in parts or [] if isinstance(p, tuple)), None)
                 if raw is None:
                     continue
                 try:
                     mail = parse_message(raw, self.env.data_dir)
                 except Exception as exc:  # одно битое письмо не должно блокировать ящик
-                    log.warning("письмо пропущено при разборе: %s", type(exc).__name__)
+                    log.warning("письмо UID %s пропущено при разборе: %s", label,
+                                type(exc).__name__)
                     continue
                 self._uids[mail.message_id] = uid
                 result.append(mail)

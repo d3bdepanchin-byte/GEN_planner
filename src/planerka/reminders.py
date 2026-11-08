@@ -39,15 +39,12 @@ def company_tz(session: Session) -> ZoneInfo:
     return ZoneInfo(get_setting(session, "company.timezone"))
 
 
-def _add_local_workdays(cal: Calendar, start: datetime, n: int,
-                        tz: ZoneInfo | None) -> datetime:
+def _add_local_workdays(cal: Calendar, start: datetime, n: int, tz: ZoneInfo) -> datetime:
     """Рабочие дни считаются по местной дате компании; результат — в UTC."""
-    tz = tz or timezone.utc
     return cal.add_workdays(start.astimezone(tz), n).astimezone(timezone.utc)
 
 
-def set_due(review: ReviewFile, cal: Calendar, workdays: int,
-            tz: ZoneInfo | None = None) -> None:
+def set_due(review: ReviewFile, cal: Calendar, workdays: int, tz: ZoneInfo) -> None:
     """«Без реакции» отсчитывается от отправки файла (Д-45). tz — company_tz(session)."""
     review.due_at = _add_local_workdays(cal, review.sent_at, workdays, tz)
 

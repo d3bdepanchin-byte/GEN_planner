@@ -1,5 +1,8 @@
 """Разбор записи: маскирование → вторая проверка → LLM → расшифровка → постобработка → сохранение.
 
+`analyze_source` — всё до сохранения: кандидаты и правки без номеров, в сессию не добавлены
+(переобработка, Д-51). `extract_source` — то же плюс номера И-NNN и запись в ядро.
+
 Во внешний LLM уходит только текст, прошедший `ensure_clean` (правило 5): при остатке ПДн
 `MaskingUncertain` выходит наружу до запроса. Ответ LLM — недоверенный: люди резолвятся из токена
 прямо в сотрудника (R18), текстовые поля — через `demask_text` (R19). Токен и таймкод принимаются,
@@ -68,6 +71,17 @@ class ExtractReport:
 
 
 @dataclass
+class Analysis:
+    """Результат разбора до сохранения: задачи без номеров, в сессию не добавлены."""
+    candidates: list[Task]
+    edits: list[TaskEdit]
+    summary: str
+    final_block_found: bool
+    prompt: str  # «extract_tasks.v1»
+    notes: list[str] = field(default_factory=list)  # без ПДн
+
+
+@dataclass
 class _Recording:
     """Что есть в замаскированной записи: только этим токенам и таймкодам можно верить."""
     source: Source
@@ -88,13 +102,12 @@ class _Recording:
         return (value, True) if ok else (None, False)
 
 
-def extract_source(session: Session, source: Source, transcript: Transcript,
-                   deps: ExtractDeps) -> ExtractReport:
-    """Кандидаты задач и правки из стенограммы. Разобранный источник повторно не разбирается."""
-    report = ExtractReport()
-    if source.status == EXTRACTED:
-        return report
+def analyze_source(session: Session, source: Source, transcript: Transcript,
+                   deps: ExtractDeps) -> Analysis:
+    """Кандидаты и правки из стенограммы без сохранения: Task и TaskEdit не создаются в БД.
 
+    Токены внешних людей и контактов при маскировании сохраняются (TokenStore).
+    """
     masked = deps.masker.mask(transcript.text, source.id)
     ensure_clean(masked.text, deps.directory, deps.names)
     goals: list[str] = list(get_setting(session, 'goals.goals_2027'))
@@ -107,31 +120,50 @@ def extract_source(session: Session, source: Source, transcript: Transcript,
     rec = _Recording(source, deps.tokens, set(TOKEN_IN_TEXT.findall(masked.text)),
                      set(_TIMECODE.findall(masked.text)))
 
-    for edit in result.edits:  # до новых задач: правка — только к уже существующему номеру
-        _save_edit(session, rec, edit, report)
+    report_notes: list[str] = []
+    edits = [e for e in (_task_edit(session, rec, edit, report_notes) for edit in result.edits)
+             if e is not None]  # до новых задач: правка — только к уже существующему номеру
 
     post = _Postprocess(goals, meeting)
-    created: list[Task] = []
-    for c in result.candidates:
-        task = _candidate_task(session, rec, c, result.final_block_found, post)
-        session.add(task)
-        created.append(task)
-    session.flush()
+    created = [_candidate_task(session, rec, c, result.final_block_found, post)
+               for c in result.candidates]
     _check_priority_a(session, created, int(get_setting(session, 'registry.max_priority_a')))
 
     notes: list[str] = []
     summary = rec.text(result.summary, notes)
-    report.notes += [f'саммари: {_kind(n)}' for n in notes]
+    report_notes += [f'саммари: {_kind(n)}' for n in notes]
+    return Analysis(candidates=created, edits=edits, summary=summary,
+                    final_block_found=result.final_block_found,
+                    prompt=f'{deps.prompt.name}.v{deps.prompt.version}', notes=report_notes)
+
+
+def extract_source(session: Session, source: Source, transcript: Transcript,
+                   deps: ExtractDeps) -> ExtractReport:
+    """Кандидаты задач и правки из стенограммы. Разобранный источник повторно не разбирается."""
+    report = ExtractReport()
+    if source.status == EXTRACTED:
+        return report
+
+    analysis = analyze_source(session, source, transcript, deps)
+    for edit in analysis.edits:
+        session.add(edit)
+    for task in analysis.candidates:
+        task.number = next_task_number(session)
+        session.add(task)
+    session.flush()
+
     flags = dict(source.flags or {})
-    flags['prompt'] = f'{deps.prompt.name}.v{deps.prompt.version}'
-    if not result.final_block_found:
+    flags['prompt'] = analysis.prompt
+    if not analysis.final_block_found:
         flags[NO_FINAL_BLOCK] = True
     source.flags = flags
-    source.summary = summary
+    source.summary = analysis.summary
     source.status = EXTRACTED
     session.flush()
 
-    report.created = [t.number for t in created]
+    report.created = [t.number for t in analysis.candidates]
+    report.edits = len(analysis.edits)
+    report.notes = analysis.notes
     log.info('источник %s разобран: кандидатов %d, правок %d, заметок %d',
              source.id, len(report.created), report.edits, len(report.notes))
     return report
@@ -142,26 +174,26 @@ def _kind(note: str) -> str:
     return note if note in (UNKNOWN, NOT_IN_RECORDING, NO_TIMECODE) else 'неоднозначный токен'
 
 
-def _save_edit(session: Session, rec: _Recording, edit: EditOut, report: ExtractReport) -> None:
+def _task_edit(session: Session, rec: _Recording, edit: EditOut,
+               report_notes: list[str]) -> TaskEdit | None:
+    """Правка к существующей задаче, в сессию не добавлена; иначе None и заметка."""
     try:
         number = parse_number(edit.task_number)
     except ValueError:
-        report.notes.append('правка: не номер задачи')
-        return
+        report_notes.append('правка: не номер задачи')
+        return None
     label = format_number(number)
     if session.scalar(select(Task.id).where(Task.number == number)) is None:
-        report.notes.append(f'правка к несуществующей задаче {label}')
-        return
+        report_notes.append(f'правка к несуществующей задаче {label}')
+        return None
     notes: list[str] = []
     change, quote = rec.text(edit.change, notes), rec.text(edit.quote, notes)
     timecode, ok = rec.timecode(edit.timecode)
     if not ok:
         notes.append(NO_TIMECODE)
-    report.notes += [f'правка к {label}: {_kind(n)}' for n in dict.fromkeys(notes)]
-    session.add(TaskEdit(task_number=number, change=change, quote=quote or None,
-                         timecode=timecode, source_id=rec.source.id,
-                         status=TaskStatus.CANDIDATE.value))
-    report.edits += 1
+    report_notes += [f'правка к {label}: {_kind(n)}' for n in dict.fromkeys(notes)]
+    return TaskEdit(task_number=number, change=change, quote=quote or None, timecode=timecode,
+                    source_id=rec.source.id, status=TaskStatus.CANDIDATE.value)
 
 
 def _norm(text: str) -> str:
@@ -230,8 +262,8 @@ def _candidate_task(session: Session, rec: _Recording, c: CandidateOut, final_bl
     if not (final_block_found and c.from_final_block):
         flags.append(FROM_DISCUSSION)
 
-    task = Task(
-        number=next_task_number(session), title=title, type=c.type,
+    task = Task(  # номер выдаёт extract_source при сохранении
+        title=title, type=c.type,
         priority=c.priority, goal_2027=c.goal_2027, author_id=author_id, owner_id=owner_id,
         coexecutor_ids=coexecutor_ids, due_date=c.due_date, control_date=c.control_date,
         done_criteria=done or None, source_id=rec.source.id, timecode=timecode,
@@ -279,11 +311,15 @@ def _person(session: Session, rec: _Recording, value: str | None, role: tuple[st
 
 
 def _check_priority_a(session: Session, created: list[Task], limit: int) -> None:
-    """Больше `limit` незавершённых задач A у человека — только вопрос (Д-79)."""
+    """Больше `limit` незавершённых задач A у человека — только вопрос (Д-79).
+
+    Новые задачи ещё не в БД: считаются сохранённые плюс новые.
+    """
     owners = {t.owner_id for t in created if t.priority == 'A' and t.owner_id is not None}
     for owner_id in owners:
         count = session.scalar(select(func.count()).select_from(Task).where(
             Task.owner_id == owner_id, Task.priority == 'A', Task.status.in_(_OPEN)))
+        count += sum(1 for t in created if t.owner_id == owner_id and t.priority == 'A')
         if count <= limit:
             continue
         note = f'у ответственного больше {limit} задач A ({count}) — пересмотреть приоритеты'

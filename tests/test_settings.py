@@ -8,6 +8,16 @@ def test_defaults_flattened():
     assert d['review.return_workdays'] == 2
     assert d['intake.opening_phrases.planerka'] == ['начинаем планёрку']
 
+def test_defaults_independent_of_cwd(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert load_defaults()['jobs.max_attempts'] == 5
+
+
+def test_new_intervals_have_start_values():
+    d = load_defaults()
+    assert (d['mail.poll_interval_sec'], d['reminders.interval_sec']) == (120, 900)
+
+
 def test_goals_2027_from_spec():
     assert load_defaults()['goals.goals_2027'] == [
         'стратегия продаж', 'сайт и маркетинг', 'ассортимент',

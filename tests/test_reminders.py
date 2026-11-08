@@ -60,8 +60,14 @@ def sent_review(session, cal, executor, task, tmp_path):
 
 def test_due_counts_workdays_skipping_holiday(cal):
     rf = ReviewFile(sent_at=datetime(2026, 11, 3, 9, tzinfo=UTC))
-    set_due(rf, cal, 2)
+    set_due(rf, cal, 2, ZoneInfo('UTC'))
     assert rf.due_at == datetime(2026, 11, 6, 9, tzinfo=UTC)
+
+
+def test_set_due_requires_company_tz(cal):
+    rf = ReviewFile(sent_at=datetime(2026, 11, 3, 9, tzinfo=UTC))
+    with pytest.raises(TypeError):
+        set_due(rf, cal, 2)
 
 
 def test_not_due_before_deadline(session, cal, sent_review):

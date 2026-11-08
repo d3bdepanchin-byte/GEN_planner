@@ -20,8 +20,8 @@ from planerka.review.xlsx import (
     employee_index, read_meta, style_sheet, write_meta,
 )
 
-__all__ = ["OwnerDecision", "OwnerRow", "ParsedOwnerReview", "build_owner_file",
-           "parse_owner_file", "apply_owner_review"]
+__all__ = ["OwnerDecision", "OwnerRow", "ParsedOwnerReview", "pending_owner_items",
+           "build_owner_file", "parse_owner_file", "apply_owner_review"]
 
 SECTION_CONFIRMED = "подтверждена исполнителем"
 SECTION_AMBIGUOUS = "спорная: неоднозначное имя"
@@ -109,9 +109,8 @@ def _section(task: Task, not_returned: set[int]) -> str | None:
     return None
 
 
-def build_owner_file(session: Session, owner: Employee, out_dir: Path,
-                     now: datetime) -> ReviewFile | None:
-    """Файл владельцу: всё, что ждёт его решения. Решать нечего — None."""
+def pending_owner_items(session: Session) -> list[tuple[Task, str]]:
+    """Задачи, которые ждут решения владельца реестра, с разделом; по разделам и номерам."""
     not_returned: set[int] = set()
     for rf in session.scalars(select(ReviewFile).where(
             ReviewFile.kind == "executor", ReviewFile.escalated_at.is_not(None),
@@ -123,12 +122,19 @@ def build_owner_file(session: Session, owner: Employee, out_dir: Path,
         section = _section(t, not_returned)
         if section is not None:
             items.append((SECTIONS.index(section), t, section))
+    items.sort(key=lambda i: (i[0], i[1].number))
+    return [(t, section) for _, t, section in items]
+
+
+def build_owner_file(session: Session, owner: Employee, out_dir: Path,
+                     now: datetime) -> ReviewFile | None:
+    """Файл владельцу: всё, что ждёт его решения. Решать нечего — None."""
+    items = pending_owner_items(session)
     if not items:
         return None
-    items.sort(key=lambda i: (i[0], i[1].number))
 
     review = ReviewFile(kind="owner", employee_id=owner.id, path="",
-                        task_numbers=sorted(t.number for _, t, _ in items))
+                        task_numbers=sorted(t.number for t, _ in items))
     session.add(review)
     session.flush()
 
@@ -137,7 +143,7 @@ def build_owner_file(session: Session, owner: Employee, out_dir: Path,
     ws = wb.active
     ws.title = TASKS_SHEET
     ws.append(HEADERS)
-    for _, t, section in items:
+    for t, section in items:
         ws.append([format_number(t.number), t.title, names.get(t.owner_id), t.due_date, section,
                    "\n".join(t.questions or []), t.registry_suggested or t.registry, t.priority])
     last = len(items) + 1

@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from planerka.db.models import ChannelId, Employee
+from planerka.settings import PROJECT_ROOT
 
-DIMINUTIVES_PATH = Path("config/diminutives.toml")
+DIMINUTIVES_PATH = PROJECT_ROOT / "config" / "diminutives.toml"
 
 _COL_NAME, _COL_DEPT, _COL_ROLE = "ФИО", "Отдел", "Должность"
 _COL_EMAIL, _COL_VARIANTS = "E-mail", "Варианты имени"

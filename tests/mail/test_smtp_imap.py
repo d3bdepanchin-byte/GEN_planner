@@ -219,3 +219,37 @@ def test_broken_message_does_not_block_others(monkeypatch, tmp_path):
     monkeypatch.setattr(imap, 'parse_message', flaky)
     got = ImapServiceInbox(env(tmp_path)).fetch_new()
     assert [m.message_id for m in got] == ['<g1@example.test>', '<g2@example.test>']
+
+
+def test_broken_message_logs_uid(monkeypatch, tmp_path, caplog):
+    fake = FetchImap([_msg('a.xlsx', '<g1@example.test>'), b'\xff\xfe broken'])
+    fake.login = lambda u, p: ('OK', [])
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    real = imap.parse_message
+
+    def flaky(raw, data_dir):
+        if raw.startswith(b'\xff'):
+            raise ValueError('boom')
+        return real(raw, data_dir)
+    monkeypatch.setattr(imap, 'parse_message', flaky)
+    caplog.set_level('WARNING')
+    ImapServiceInbox(env(tmp_path)).fetch_new()
+    assert 'UID 2' in caplog.text and 'ValueError' in caplog.text
+
+
+def test_fetch_failure_does_not_block_others(monkeypatch, tmp_path, caplog):
+    raws = [_msg('a.xlsx', '<g1@example.test>'), b'', _msg('b.xlsx', '<g2@example.test>')]
+    fake = FetchImap(raws)
+    fake.login = lambda u, p: ('OK', [])
+    plain = fake.uid
+
+    def uid(cmd, *a):
+        if cmd == 'FETCH' and a[0] == b'2':
+            raise imap.imaplib.IMAP4.error('FETCH failed')
+        return plain(cmd, *a)
+    fake.uid = uid
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    caplog.set_level('WARNING')
+    got = ImapServiceInbox(env(tmp_path)).fetch_new()
+    assert [m.message_id for m in got] == ['<g1@example.test>', '<g2@example.test>']
+    assert 'UID 2' in caplog.text

@@ -11,10 +11,10 @@ from rapidfuzz.distance import Levenshtein
 
 from planerka.core.directory import EmployeeRef, norm_name
 from planerka.masking.patterns import Span
-from planerka.settings import get_setting
+from planerka.settings import PROJECT_ROOT, get_setting
 
 WORD = re.compile(r'[^\W\d_]+(?:-[^\W\d_]+)*')
-STOPLIST_PATH = Path('config/masking_stoplist.toml')
+STOPLIST_PATH = PROJECT_ROOT / 'config' / 'masking_stoplist.toml'
 
 
 class NameFinder(Protocol):

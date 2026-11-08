@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 
+from planerka.settings import PROJECT_ROOT
+
 SEPARATOR = '---USER---'
 
 
@@ -24,7 +26,7 @@ class Prompt:
             raise PromptVariableError(f'нет переменной {e.args[0]!r} для промпта {self.name}.v{self.version}') from None
 
 
-def load_prompt(name: str, version: int, dir: Path = Path('prompts')) -> Prompt:
+def load_prompt(name: str, version: int, dir: Path = PROJECT_ROOT / 'prompts') -> Prompt:
     path = dir / f'{name}.v{version}.md'
     raw = path.read_text(encoding='utf-8')
     system, sep, template = raw.partition(SEPARATOR)

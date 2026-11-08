@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 
 from planerka.db.models import Setting
 
+# Корень проекта: config/ и prompts/ ищутся от него, а не от текущего каталога.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 class Env(BaseModel):
     """Переменные окружения. Имя переменной — имя поля в верхнем регистре."""
@@ -53,7 +56,7 @@ def _flatten(table: Mapping[str, Any], prefix: str, out: dict[str, Any]) -> None
             out[path] = value
 
 
-def load_defaults(path: Path = Path("config/defaults.toml")) -> dict[str, Any]:
+def load_defaults(path: Path = PROJECT_ROOT / "config" / "defaults.toml") -> dict[str, Any]:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     out: dict[str, Any] = {}

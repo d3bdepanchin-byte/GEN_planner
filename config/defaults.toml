@@ -31,7 +31,13 @@ max_attempts = 3  # старт
 timeout_sec = 600  # старт; длинные планёрки
 
 [jobs]
-max_attempts = 5  # старт
+max_attempts = 5  # старт; пауза между попытками 1, 2, 4… минуты
+
+[mail]
+poll_interval_sec = 120  # старт (R24): как часто читать служебный ящик
+
+[reminders]
+interval_sec = 900  # старт (R24): напоминания и файл владельцу реестра
 
 [company]
 timezone = "Asia/Barnaul"  # старт; рабочие дни считаются по местной дате

@@ -13,8 +13,9 @@ from planerka.core.directory import ImportReport, load_directory, norm_name
 from planerka.core.numbering import parse_number, set_sequence_after
 from planerka.core.statuses import TaskStatus
 from planerka.db.models import History, Task
+from planerka.settings import PROJECT_ROOT
 
-MAPPING_PATH = Path("config/registry_mapping.toml")
+MAPPING_PATH = PROJECT_ROOT / "config" / "registry_mapping.toml"
 Q_OWNER_MISSING = "ответственный не найден в справочнике"
 Q_OWNER_AMBIGUOUS = "ответственный неоднозначен: выбрать при утверждении"
 Q_TYPE = "тип не указан: уточнить"

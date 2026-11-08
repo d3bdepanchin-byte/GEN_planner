@@ -32,5 +32,37 @@ services:
       - .:/app
     working_dir: /app
 
+  worker:
+    build:
+      context: .
+      args:
+        INSTALL_ASR: ${INSTALL_ASR:-1}
+    command: planerka worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://planerka:planerka@db:5432/planerka
+      # Модели — только из локального кэша (R16): переменные до старта процесса.
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: /app/models/hf
+      DATA_DIR: /app/data
+      INBOX_DIR: /app/inbox
+      MODELS_DIR: /app/models
+      BACKUP_DIR: /app/backups
+    volumes:
+      - ./data:/app/data
+      # Папка-приёмник «Записи встреч»: система только читает и копирует (Д-69).
+      - ${INBOX_HOST_DIR:-./data/inbox}:/app/inbox:ro
+      - ./models:/app/models
+      - ./backups:/app/backups
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
+    working_dir: /app
+
 volumes:
   pgdata:
