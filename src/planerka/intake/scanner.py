@@ -120,6 +120,10 @@ class IntakeScanner:
             if target_dir is not None:
                 shutil.rmtree(target_dir, ignore_errors=True)
             return None, False
+        except BaseException:
+            if target_dir is not None:
+                shutil.rmtree(target_dir, ignore_errors=True)
+            raise
         session.flush()
         older = session.scalars(select(Source).where(
             Source.flags["inbox_key"].as_string() == key,

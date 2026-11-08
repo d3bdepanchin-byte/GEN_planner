@@ -167,33 +167,31 @@ def test_vanished_file_does_not_abort_scan(session, scanner, inbox, monkeypatch)
     (inbox / "a.mp3").write_bytes(b"a")
     (inbox / "b.mp3").write_bytes(b"b")
     scanner.scan(session, T0)
-    real = shutil.copyfile
+    real_take = IntakeScanner._take
 
-    def flaky(src, dst, *a, **k):
-        if Path(src).name == "a.mp3":
-            raise FileNotFoundError(src)
-        return real(src, dst, *a, **k)
+    def take_after_vanish(self, sess, path, *args):
+        if path.name == "a.mp3":
+            path.unlink()  # файл исчез между stat и приёмом
+        return real_take(self, sess, path, *args)
 
-    monkeypatch.setattr("planerka.intake.scanner.shutil.copyfile", flaky)
+    monkeypatch.setattr(IntakeScanner, "_take", take_after_vanish)
     got = scanner.scan(session, T0 + timedelta(seconds=301))
     assert len(got) == 1
     assert session.scalar(select(func.count()).select_from(Source)) == 1
 
 
 def test_hash_is_of_stored_copy(session, scanner, inbox, monkeypatch):
-    f = inbox / "p.mp3"
-    f.write_bytes(b"before")
+    (inbox / "p.mp3").write_bytes(b"before")
     scanner.scan(session, T0)
     real = shutil.copyfile
 
-    def copy_then_change(src, dst, *a, **k):
-        out = real(src, dst, *a, **k)
-        Path(src).write_bytes(b"after-change")
-        return out
+    def change_then_copy(src, dst, *a, **k):
+        Path(src).write_bytes(b"after-change")  # файл меняется до копирования
+        return real(src, dst, *a, **k)
 
-    monkeypatch.setattr("planerka.intake.scanner.shutil.copyfile", copy_then_change)
+    monkeypatch.setattr("planerka.intake.scanner.shutil.copyfile", change_then_copy)
     src = scanner.scan(session, T0 + timedelta(seconds=301))[0]
-    assert src.sha256 == hashlib.sha256(b"before").hexdigest()
+    assert src.sha256 == hashlib.sha256(b"after-change").hexdigest()
     assert sha256_file(Path(src.path)) == src.sha256
 
 
