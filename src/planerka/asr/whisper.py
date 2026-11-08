@@ -3,7 +3,13 @@ import time
 from pathlib import Path
 
 from planerka.asr._hub import hub_env
-from planerka.asr.base import NoSpeech, Segment, Transcript, TranscriberUnavailable
+from planerka.asr.base import (
+    NoSpeech,
+    Segment,
+    Transcript,
+    TranscriberUnavailable,
+    TranscriptionFailed,
+)
 
 
 class WhisperTranscriber:
@@ -53,7 +59,7 @@ class WhisperTranscriber:
                     if s.text.strip()
                 ]
         except Exception as e:
-            raise TranscriberUnavailable(
+            raise TranscriptionFailed(
                 f'Whisper не распознал запись: {type(e).__name__}'
             ) from None
         processing = time.monotonic() - started

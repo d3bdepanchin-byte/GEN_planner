@@ -3,7 +3,13 @@ import time
 from pathlib import Path
 
 from planerka.asr._hub import hub_env, wav_duration
-from planerka.asr.base import NoSpeech, Segment, Transcript, TranscriberUnavailable
+from planerka.asr.base import (
+    NoSpeech,
+    Segment,
+    Transcript,
+    TranscriberUnavailable,
+    TranscriptionFailed,
+)
 
 
 class GigaAMTranscriber:
@@ -54,7 +60,7 @@ class GigaAMTranscriber:
                     if s.text and s.text.strip()
                 ]
         except Exception as e:
-            raise TranscriberUnavailable(
+            raise TranscriptionFailed(
                 f'GigaAM не распознал запись: {type(e).__name__}'
             ) from None
         processing = time.monotonic() - started

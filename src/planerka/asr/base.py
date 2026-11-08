@@ -8,6 +8,10 @@ class TranscriberUnavailable(Exception):
     """Распознаватель недоступен или не знает такой записи. Без текста стенограммы."""
 
 
+class TranscriptionFailed(TranscriberUnavailable):
+    """Модель загружена, но запись не распознана (битый файл, сбой в процессе). Без текста стенограммы."""
+
+
 class NoSpeech(Exception):
     """В записи нет речи. Без текста стенограммы."""
 
