@@ -1,0 +1,61 @@
+# Пороги и интервалы. Секретов здесь нет: они только в .env.
+# Пометка в комментарии: «старт» — стартовое значение, правится в настройках;
+# Д-NN — решение из журнала docs/spec.md; «задать при запуске» — заполнить при запуске.
+
+[intake]
+stability_window_sec = 300  # старт
+poll_interval_sec = 30  # старт
+opening_window_sec = 180  # старт
+extensions = [".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".mov", ".mkv"]  # старт
+
+[intake.opening_phrases]
+planerka = ["начинаем планёрку"]  # регламент
+one_on_one = ["встреча один на один"]  # регламент
+
+[asr]
+engine = "gigaam"  # до итога задачи 11
+model = "v3_e2e_rnnt"  # до итога задачи 11
+overnight_window_hours = 14  # старт (Д-82)
+meeting_hours_max = 2  # старт
+
+[masking]
+fuzzy_threshold = 88  # старт
+
+[llm]
+model_extract = "claude-sonnet-5-5"  # старт; сверено по docs.claude.com (R9)
+max_tokens = 8000  # старт
+max_attempts = 3  # старт
+
+[jobs]
+max_attempts = 5  # старт
+
+[review]
+return_workdays = 2  # Д-44
+escalate_after_workdays = 1  # старт
+
+[registry]
+owner_employee_id = 0  # задать при запуске
+closed_access_employee_ids = []  # задать при запуске (Д-71)
+task_number_start = 1  # перекрывается импортом (задача 7)
+
+[meeting]
+host_employee_id = 0  # задать при запуске
+
+[goals]
+# Д-78, сверить со спекой
+goals_2027 = [
+    "стратегия продаж",
+    "сайт и маркетинг",
+    "ассортимент",
+    "автоматизация и ИИ",
+    "эффективность",
+    "клиентская база",
+    "нет связи",
+]
+
+[alerts]
+developer_email = ""  # задать при запуске
+sysadmin_email = ""  # задать при запуске
+
+[backup]
+keep_days = 30  # старт, до ответа юриста (Д-32)
