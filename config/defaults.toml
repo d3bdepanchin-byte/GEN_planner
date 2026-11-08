@@ -28,6 +28,7 @@ surname_max_edits_long = 2  # старт
 model_extract = "claude-sonnet-5-5"  # старт; сверено с данными среды Claude Code 08.11.2026
 max_tokens = 8000  # старт
 max_attempts = 3  # старт
+timeout_sec = 600  # старт; длинные планёрки
 
 [jobs]
 max_attempts = 5  # старт

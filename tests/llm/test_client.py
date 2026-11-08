@@ -200,3 +200,28 @@ def test_sdk_client_has_no_sdk_retries_and_timeout():
     client = AnthropicClient('k', 'm', 100, 3)
     assert client._client.max_retries == 0
     assert client._client.timeout == 600
+
+
+def test_timeout_is_parameter_reaching_sdk_client():
+    client = AnthropicClient('k', 'm', 100, 3, timeout_sec=42)
+    assert client._client.timeout == 42
+
+
+def test_default_timeout_matches_settings_default():
+    import tomllib
+    cfg = tomllib.loads((Path(__file__).parents[2] / 'config' / 'defaults.toml').read_text(encoding='utf-8'))
+    assert cfg['llm']['timeout_sec'] == 600
+    assert AnthropicClient('k', 'm', 100, 3)._client.timeout == cfg['llm']['timeout_sec']
+
+
+def test_other_sdk_errors_become_llm_error_without_body(monkeypatch):
+    def raiser(**kwargs):
+        resp = httpx.Response(200, request=REQ, text='секрет [P1]')
+        raise anthropic.APIResponseValidationError(response=resp, body='секрет [P1]')
+    client = AnthropicClient('k', 'm', 100, 3)
+    monkeypatch.setattr(client, '_raw_create', raiser)
+    with pytest.raises(LLMError) as e:
+        client.complete_json(PROMPT, {'text': 'x'}, Out)
+    assert not isinstance(e.value, LLMUnavailable)
+    assert str(e.value) == 'APIResponseValidationError'
+    assert e.value.__cause__ is None and e.value.__suppress_context__
