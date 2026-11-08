@@ -128,3 +128,22 @@ def test_load_diminutives_default_file():
     d = load_diminutives()
     assert 50 <= len(d) <= 80
     assert 'Санёк' in d['Александр'] and d['Ольга'][0] == 'Оля'
+
+
+def test_diminutive_lookup_ignores_case_and_yo():
+    dim = {'Артём': ['Тёма'], 'алёна': ['Алёнка']}
+    v = name_variants('Смирнов Артем Ильич', dim)
+    assert 'Тёма' in v and 'Тёма Смирнов' in v
+    assert 'Алёнка' in name_variants('Орлова АЛЕНА', dim)
+
+
+def test_email_owned_by_other_employee_is_problem_without_names(session, tmp_path):
+    other = Employee(full_name='Петров Пётр')
+    session.add(other)
+    session.flush()
+    session.add(ChannelId(employee_id=other.id, channel='email', external_id='busy@example.test'))
+    session.flush()
+    p = _xlsx(tmp_path / 'busy.xlsx', [['Сидоров Семён', 'Склад', None, 'busy@example.test', None]])
+    rep = import_employees(session, p, DIM)
+    assert rep.problems == ['строка 2: e-mail занят другим сотрудником']
+    assert len(session.scalars(select(ChannelId)).all()) == 1

@@ -1,5 +1,6 @@
 """Справочник сотрудников: импорт из xlsx отдела кадров и варианты имён для маскирования."""
 import tomllib
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,11 @@ class EmployeeRef:
     variants: list[str]
 
 
+def norm_name(text: str) -> str:
+    """Ключ сравнения имён: без регистра и без различия е/ё (HR пишет «Артем»)."""
+    return " ".join(text.split()).casefold().replace("ё", "е")
+
+
 def load_diminutives(path: Path = DIMINUTIVES_PATH) -> dict[str, list[str]]:
     with open(path, "rb") as f:
         return {k: list(v) for k, v in tomllib.load(f).items()}
@@ -38,13 +44,16 @@ def name_variants(full_name: str, diminutives: dict[str, list[str]]) -> list[str
     """Формы, в которых сотрудника могут назвать вслух. Порядок стабилен, без повторов."""
     parts = full_name.split()
     out = [" ".join(parts)]
+    by_norm: dict[str, list[str]] = {}
+    for key, forms in diminutives.items():
+        by_norm.setdefault(norm_name(key), []).extend(forms)
     if len(parts) >= 2:
         surname, first = parts[0], parts[1]
         out += [f"{surname} {first}", f"{first} {surname}", surname]
         if len(parts) >= 3:
             out.append(f"{first} {parts[2]}")
         out.append(first)
-        for dim in diminutives.get(first, []):
+        for dim in by_norm.get(norm_name(first), []):
             out += [dim, f"{dim} {surname}"]
     return list(dict.fromkeys(v for v in out if v))
 
@@ -60,13 +69,19 @@ def import_employees(session: Session, path: Path,
                      diminutives: dict[str, list[str]]) -> ImportReport:
     """Ключ повторного импорта: e-mail (без регистра), без него — ФИО."""
     report = ImportReport()
-    wb = load_workbook(path, read_only=True, data_only=True)
+    with closing(load_workbook(path, read_only=True, data_only=True)) as wb:
+        _import_rows(session, wb, diminutives, report)
+    return report
+
+
+def _import_rows(session: Session, wb, diminutives: dict[str, list[str]],
+                 report: ImportReport) -> None:
     rows = wb.active.iter_rows(values_only=True)
     header = next(rows, ())
     idx = {str(h).strip(): i for i, h in enumerate(header) if h is not None}
     if _COL_NAME not in idx:
         report.problems.append(f"нет колонки «{_COL_NAME}»")
-        return report
+        return
 
     for n, row in enumerate(rows, start=2):
         if all(c is None or str(c).strip() == "" for c in row):
@@ -108,11 +123,14 @@ def import_employees(session: Session, path: Path,
             name_variants(full_name, diminutives) + [v for v in hr_variants if v]))
         session.flush()
 
-        if email and session.scalars(select(ChannelId).where(
-                ChannelId.channel == "email", ChannelId.external_id == email)).first() is None:
-            session.add(ChannelId(employee_id=emp.id, channel="email", external_id=email))
-            session.flush()
-    return report
+        if email:
+            ch = session.scalars(select(ChannelId).where(
+                ChannelId.channel == "email", ChannelId.external_id == email)).first()
+            if ch is None:
+                session.add(ChannelId(employee_id=emp.id, channel="email", external_id=email))
+                session.flush()
+            elif ch.employee_id != emp.id:
+                report.problems.append(f"строка {n}: e-mail занят другим сотрудником")
 
 
 def load_directory(session: Session) -> list[EmployeeRef]:
