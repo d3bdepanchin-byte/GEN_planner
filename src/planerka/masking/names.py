@@ -222,13 +222,79 @@ def match_employees(text: str, directory: list[EmployeeRef],
     return sorted(out, key=lambda m: m.span.start)
 
 
+Range = tuple[int, int]
+
+# Падежные формы брендов: «Макита» → «Макиты», «Макитой»; «Кедр» → «Кедра», «Кедром».
+# Окончаний фамилий (-ов, -ин, -ым) здесь нет: «Кедров» — не форма «кедр».
+_BRAND_ENDINGS_A = ('а', 'ы', 'и', 'е', 'у', 'ой', 'ою', '', 'ам', 'ами', 'ах')
+_BRAND_ENDINGS_CONS = ('', 'а', 'у', 'ом', 'ем', 'е', 'ы', 'и', 'ам', 'ами', 'ах')
+_CYR_DECLINABLE = re.compile(r'[а-я]*[бвгджзклмнпрстфхцчшщ]|[а-я]+[ая]')
+
+
+def _brand_forms(entry: str) -> set[str]:
+    w = norm_name(entry)
+    if not _CYR_DECLINABLE.fullmatch(w):  # латиница и несклоняемые — только как есть
+        return {w}
+    if w[-1] in 'ая':
+        return {w[:-1] + e for e in _BRAND_ENDINGS_A}
+    return {w + e for e in _BRAND_ENDINGS_CONS}
+
+
 @lru_cache(maxsize=4)
 def load_stoplist(path: Path = STOPLIST_PATH) -> frozenset[str]:
-    """Бренды и слова, которые не ПДн (Д-21, Д-26): их не маскируют NER и проход по граммемам."""
+    """Формы брендов из стоп-листа (Д-21, Д-26): без регистра, с падежными окончаниями."""
     with open(path, 'rb') as f:
-        return frozenset(norm_name(w) for w in tomllib.load(f)['words'])
+        return frozenset(f for w in tomllib.load(f)['words'] for f in _brand_forms(w))
 
 
-def stop_spans(text: str, stoplist: frozenset[str]) -> list[tuple[int, int]]:
-    """Слова текста, у которых сама форма или одна из лемм — в стоп-листе («Макиты»)."""
-    return [(w.start(), w.end()) for w in WORD.finditer(text) if lemmas(w.group()) & stoplist]
+@lru_cache(maxsize=100_000)
+def _person_lemmas(word: str) -> frozenset[str]:
+    return frozenset(norm_name(p.normal) for p in _morph().parse(word)
+                     if any(g in p.tag for g in _PERSON_GRAMMEMES))
+
+
+def stop_spans(text: str, stoplist: frozenset[str]) -> list[Range]:
+    """Слова-бренды: сама форма в стоп-листе, и ни один разбор как имени не ведёт за его пределы.
+
+    «Кедров» не бренд (форма вне списка), «Аврора» — бренд (имя «аврора» в списке).
+    """
+    return [(w.start(), w.end()) for w in WORD.finditer(text)
+            if norm_name(w.group()) in stoplist and _person_lemmas(w.group()) <= stoplist]
+
+
+def only_stop_words(text: str, start: int, end: int, stops: list[Range]) -> bool:
+    """Спан распознавателя имён целиком из брендов: «Макита». «Аврора Петренко» — нет."""
+    words = [(w.start(), w.end()) for w in WORD.finditer(text, start, end)]
+    return bool(words) and set(words) <= set(stops)
+
+
+def stop_neighbours(text: str, stops: list[Range], people: list[Range]) -> list[Range]:
+    """Бренды вплотную (через пробелы) к имени или токену человека: «Бош Андрей» — имя целиком."""
+    anchors, rest, out = list(people), [s for s in stops if s not in people], []
+    changed = True
+    while changed:
+        changed = False
+        for st in list(rest):
+            if any(_adjacent(text, st, a) for a in anchors):
+                rest.remove(st)
+                out.append(st)
+                anchors.append(st)
+                changed = True
+    return out
+
+
+def _adjacent(text: str, a: Range, b: Range) -> bool:
+    first, second = sorted([a, b])
+    return first[1] <= second[0] and not text[first[1]:second[0]].strip()
+
+
+# Латинское слово с заглавной без цифр рядом: «John», «Smith»; аббревиатуры до 5 букв — нет.
+_LATIN = re.compile(r'(?<![\w\-])[A-Z][A-Za-z]*(?:-[A-Za-z]+)*(?![\w\-])')
+_ABBR_MAX = 5
+
+
+def latin_names(text: str, stoplist: frozenset[str]) -> list[Range]:
+    """Имена латиницей — как внешние люди; бренды из стоп-листа и «GBH», «DCK» — нет."""
+    return [(m.start(), m.end()) for m in _LATIN.finditer(text)
+            if not (m.group().isupper() and len(m.group()) <= _ABBR_MAX)
+            and norm_name(m.group()) not in stoplist]

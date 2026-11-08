@@ -1,20 +1,26 @@
 """Замена ПДн токенами. Порядок: контакты, сотрудники, остальные имена (NER и словарь), ИП.
 
-Названия компаний, цены, обороты не маскируются (правило 5, Д-21), как и слова из стоп-листа
-config/masking_stoplist.toml (бренды) — кроме имён сотрудников. Токены вставляются
-как есть, без склонения: «со [P1]». Логов и текста в исключениях здесь нет.
+Названия компаний, цены, обороты не маскируются (правило 5, Д-21), как и бренды из стоп-листа
+config/masking_stoplist.toml — если бренд не входит в имя человека и не стоит рядом с ним;
+имена сотрудников стоп-лист не скрывает. Имена латиницей маскируются как внешние люди.
+Токены вставляются как есть, без склонения: «со [P1]». Логов и текста в исключениях здесь нет.
 """
 import re
 from dataclasses import dataclass, field
 
 from planerka.core.directory import EmployeeRef
-from planerka.masking.names import (WORD, NameFinder, SurnameEdits, load_stoplist,
-                                    match_employees, person_like, stop_spans)
+from planerka.masking.names import (WORD, NameFinder, SurnameEdits, latin_names, load_stoplist,
+                                    match_employees, only_stop_words, person_like,
+                                    stop_neighbours, stop_spans)
 from planerka.masking.patterns import find_contacts
 from planerka.masking.tokens import TokenStore, token_number
 
 # Название компании с организационно-правовой формой в кавычках: имена внутри — часть названия.
-_COMPANY = re.compile(r'(?<![^\W\d_])(?:ООО|ОАО|ЗАО|ПАО|АО|НАО|ТОО)\s*[«"„“][^»"“”\n]*[»"“”]')
+# Только короткое название: без вложенных кавычек и запятых, до 40 знаков и 5 слов. Иначе
+# «ООО «Ромашка Петренко Игорь сказал, что «всё ок»» спрятало бы имя.
+_COMPANY = re.compile(
+    r'(?<![^\W\d_])(?:ООО|ОАО|ЗАО|ПАО|АО|НАО|ТОО)\s*[«"„“]([^«»"„“”,\n]{1,40})[»"“”]')
+_COMPANY_MAX_WORDS = 5
 
 # «ИП Волков», «ИП Волков И. П.», «ИП А.С. Волков», «ип волкова анна сергеевна».
 _IP_PREFIX = re.compile(
@@ -30,7 +36,8 @@ _NOT_SURNAME = frozenset('и или а но по на в во с со от до 
 
 def company_spans(text: str) -> list[tuple[int, int]]:
     """Названия компаний с организационно-правовой формой: не ПДн (Д-21)."""
-    return [(m.start(), m.end()) for m in _COMPANY.finditer(text)]
+    return [(m.start(), m.end()) for m in _COMPANY.finditer(text)
+            if len(m.group(1).split()) <= _COMPANY_MAX_WORDS]
 
 
 def _ip_names(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
@@ -135,20 +142,27 @@ class Masker:
         for s in find_contacts(text):
             repl.append(_Repl(s.start, s.end, self.tokens.contact(source_id, s.kind, s.text)))
 
+        staff = []
         for m in match_employees(text, self.directory, self.edits):
             if _overlaps(m.span.start, m.span.end, repl):
                 continue
+            staff.append((m.span.start, m.span.end))
             repl.append(_Repl(m.span.start, m.span.end, self._employee_token(m.employee_ids,
                                                                              result)))
 
         covered = [(r.start, r.end) for r in repl]
         ip_names, ip_prefixes = _ip_names(text)
-        # Сотрудники уже в covered: стоп-лист их не скрывает.
-        keep = covered + company_spans(text) + ip_prefixes + stop_spans(text, load_stoplist())
-        parts = [u for s in self.names.find(text) for u in _uncovered(s.start, s.end, keep)]
+        keep = covered + company_spans(text) + ip_prefixes
+        stoplist = load_stoplist()
+        stops = stop_spans(text, stoplist)  # сотрудники уже в covered: их стоп-лист не скрывает
+        people = [(s.start, s.end) for s in self.names.find(text)
+                  if not only_stop_words(text, s.start, s.end, stops)]
         # Запасной проход после NER: natasha не видит имён в тексте без заглавных.
-        parts += [u for w in WORD.finditer(text) if person_like(w.group())
-                  for u in _uncovered(w.start(), w.end(), keep)]
+        people += [(w.start(), w.end()) for w in WORD.finditer(text)
+                   if person_like(w.group()) and (w.start(), w.end()) not in stops]
+        people += latin_names(text, stoplist)
+        people += stop_neighbours(text, stops, people + staff + ip_names)
+        parts = [u for s, e in people for u in _uncovered(s, e, keep)]
         parts += [u for s, e in ip_names for u in _uncovered(s, e, covered + ip_prefixes)]
         for start, end in _merge(text, parts):
             repl.append(_Repl(start, end, self.tokens.external(source_id, text[start:end])))
