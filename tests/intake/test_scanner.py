@@ -1,4 +1,6 @@
 import hashlib
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta
 
 import pytest
@@ -143,3 +145,60 @@ def test_sha256_file_chunked(tmp_path):
     data = b"z" * (3 * 1024 * 1024 + 5)
     f.write_bytes(data)
     assert sha256_file(f) == hashlib.sha256(data).hexdigest()
+
+
+def test_replaced_survives_restart(session, scanner, inbox, data_dir):
+    f = inbox / "laptop.mp3"
+    f.write_bytes(b"part1")
+    first = ready(scanner, session)[0]
+    assert "laptop" not in str(first.flags)
+    restarted = IntakeScanner(inbox, data_dir)
+    with f.open("ab") as h:
+        h.write(b"part2")
+    t1 = T0 + timedelta(hours=1)
+    restarted.scan(session, t1)
+    second = restarted.scan(session, t1 + timedelta(seconds=301))[0]
+    assert second.id != first.id
+    assert session.get(Source, first.id).status == "заменён"
+    assert second.status == "получен"
+
+
+def test_vanished_file_does_not_abort_scan(session, scanner, inbox, monkeypatch):
+    (inbox / "a.mp3").write_bytes(b"a")
+    (inbox / "b.mp3").write_bytes(b"b")
+    scanner.scan(session, T0)
+    real = shutil.copyfile
+
+    def flaky(src, dst, *a, **k):
+        if Path(src).name == "a.mp3":
+            raise FileNotFoundError(src)
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr("planerka.intake.scanner.shutil.copyfile", flaky)
+    got = scanner.scan(session, T0 + timedelta(seconds=301))
+    assert len(got) == 1
+    assert session.scalar(select(func.count()).select_from(Source)) == 1
+
+
+def test_hash_is_of_stored_copy(session, scanner, inbox, monkeypatch):
+    f = inbox / "p.mp3"
+    f.write_bytes(b"before")
+    scanner.scan(session, T0)
+    real = shutil.copyfile
+
+    def copy_then_change(src, dst, *a, **k):
+        out = real(src, dst, *a, **k)
+        Path(src).write_bytes(b"after-change")
+        return out
+
+    monkeypatch.setattr("planerka.intake.scanner.shutil.copyfile", copy_then_change)
+    src = scanner.scan(session, T0 + timedelta(seconds=301))[0]
+    assert src.sha256 == hashlib.sha256(b"before").hexdigest()
+    assert sha256_file(Path(src.path)) == src.sha256
+
+
+def test_duplicate_copy_rolled_back(session, scanner, inbox, data_dir):
+    (inbox / "a.mp3").write_bytes(b"same")
+    (inbox / "b.mp3").write_bytes(b"same")
+    ready(scanner, session)
+    assert len(list((data_dir / "meetings").iterdir())) == 1

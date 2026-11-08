@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,10 @@ def _is_sync_temp(name: str) -> bool:
     return (name.startswith(".syncthing.") and name.endswith(".tmp")) or name.startswith("~syncthing~")
 
 
+class _Duplicate(Exception):
+    pass
+
+
 @dataclass
 class _Observation:
     size: int
@@ -48,7 +53,6 @@ class IntakeScanner:
         self.inbox = inbox
         self.data_dir = data_dir
         self._seen: dict[Path, _Observation] = {}
-        self._source_by_path: dict[Path, int] = {}
 
     def _candidates(self, extensions: set[str]) -> list[Path]:
         found: list[Path] = []
@@ -89,13 +93,12 @@ class IntakeScanner:
         self, session: Session, path: Path, mtime: float, now: datetime
     ) -> tuple[Source | None, bool]:
         """(новый источник или None, обработан ли файл). Сбой копирования — не обработан, повтор."""
-        digest = sha256_file(path)
-        if session.scalar(select(Source.id).where(Source.sha256 == digest)) is not None:
-            return None, True
+        key = hashlib.sha256(path.relative_to(self.inbox).as_posix().encode()).hexdigest()
         source = Source(
-            kind="запись", path="", sha256=digest, received_at=now, status="получен",
-            meeting_date=datetime.fromtimestamp(mtime).date(),
-            flags={"meeting_date_from": "mtime"})
+            kind="запись", path="", sha256=f"pending-{uuid.uuid4().hex}", received_at=now,
+            status="получен", meeting_date=datetime.fromtimestamp(mtime).date(),
+            flags={"meeting_date_from": "mtime", "inbox_key": key})
+        target_dir: Path | None = None
         try:
             with session.begin_nested():
                 session.add(source)
@@ -103,22 +106,27 @@ class IntakeScanner:
                 target_dir = self.data_dir / "meetings" / str(source.id)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target = target_dir / f"original{path.suffix}"
-                try:
-                    shutil.copyfile(path, target)
-                except BaseException:
-                    shutil.rmtree(target_dir, ignore_errors=True)
-                    raise
+                shutil.copyfile(path, target)
+                digest = sha256_file(target)  # хеш именно сохранённой копии
+                if session.scalar(select(Source.id).where(Source.sha256 == digest)) is not None:
+                    raise _Duplicate
+                source.sha256 = digest
                 source.path = str(target)
+        except _Duplicate:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            return None, True
         except OSError as exc:
-            log.warning("Копирование записи не удалось: %s", type(exc).__name__)
+            log.warning("Приём записи не удался: %s", type(exc).__name__)
+            if target_dir is not None:
+                shutil.rmtree(target_dir, ignore_errors=True)
             return None, False
-        old_id = self._source_by_path.get(path)
-        if old_id is not None and old_id != source.id:
-            old = session.get(Source, old_id)
-            if old is not None:
-                old.status = "заменён"
-                log.info("Источник %s заменён источником %s", old.id, source.id)
-        self._source_by_path[path] = source.id
+        session.flush()
+        older = session.scalars(select(Source).where(
+            Source.flags["inbox_key"].as_string() == key,
+            Source.id != source.id, Source.status != "заменён")).all()
+        for old in older:
+            old.status = "заменён"
+            log.info("Источник %s заменён источником %s", old.id, source.id)
         session.flush()
         log.info("Принят источник %s", source.id)
         return source, True
