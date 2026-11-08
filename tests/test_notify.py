@@ -1,7 +1,7 @@
 import pytest
 
 from planerka.mail.fake import FakeMailer
-from planerka.notify import assert_no_pii, send_alert
+from planerka.notify import assert_no_pii, send_alert, send_alert_safe
 
 
 @pytest.fixture
@@ -52,3 +52,18 @@ def test_alert_without_source_shows_dash(directory, mailer):
 def test_alert_without_recipients_is_silent(directory, mailer):
     send_alert(mailer, [], 'disk', None, 'мало места', directory)
     assert mailer.sent == []
+
+
+def test_safe_alert_hides_pii_detail(directory, mailer):
+    assert send_alert_safe(mailer, ['a@example.test'], 'masking', 5, 'остался Смирнов', directory)
+    body = mailer.sent[0]['body']
+    assert 'текст скрыт: содержал ПДн' in body and 'Смирнов' not in body
+
+
+def test_safe_alert_swallows_mail_error(directory, caplog):
+    class Broken:
+        def send(self, *a, **k):
+            raise OSError('smtp down')
+
+    assert send_alert_safe(Broken(), ['a@example.test'], 'disk', None, 'мало места', directory) is False
+    assert 'OSError' in caplog.text

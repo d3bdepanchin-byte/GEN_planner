@@ -33,6 +33,9 @@ timeout_sec = 600  # старт; длинные планёрки
 [jobs]
 max_attempts = 5  # старт
 
+[company]
+timezone = "Asia/Barnaul"  # старт; рабочие дни считаются по местной дате
+
 [review]
 return_workdays = 2  # Д-44
 escalate_after_workdays = 1  # старт
