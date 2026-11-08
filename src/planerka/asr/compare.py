@@ -86,22 +86,40 @@ def pick_whisper_cpu(
 ) -> tuple[CompareResult, bool]:
     """Самая крупная модель Whisper, которая укладывается в окно.
 
-    Если не укладывается ни одна — самая малая, второй элемент False.
+    Если не укладывается ни одна — самая крупная (лучшее качество, осторожно для
+    GigaAM), второй элемент False.
     """
     order = {m: i for i, m in enumerate(WHISPER_SIZES)}
     whisper = sorted((r for r in results if r.engine == 'whisper'), key=lambda r: order[r.model])
     if not whisper:
         raise ValueError('нет результатов Whisper')
     fitting = [r for r in whisper if fits_window(r, window_hours, meeting_hours)]
-    return (fitting[-1], True) if fitting else (whisper[0], False)
+    return (fitting[-1], True) if fitting else (whisper[-1], False)
 
 
-def pick_gigaam(results: list[CompareResult]) -> CompareResult:
-    """Лучший вариант GigaAM: меньше ошибок, затем больше имён, затем быстрее."""
+_RANK = {Decision.GIGAAM: 0, Decision.WAIT_FOR_GPU: 1, Decision.WHISPER: 2}
+
+
+def decide_overall(
+    results: list[CompareResult], window_hours: float, meeting_hours: float
+) -> tuple[Decision, CompareResult, CompareResult, bool]:
+    """Решение по всем вариантам GigaAM: (решение, вариант GigaAM, база whisper_cpu, Whisper в окне).
+
+    decide считается для каждого варианта; берётся лучший исход GIGAAM > WAIT_FOR_GPU > WHISPER,
+    при равенстве — меньше WER, больше имён, быстрее. Если ни один Whisper не укладывается
+    в окно, WHISPER заменяется на WAIT_FOR_GPU: к утру не успевает ничего.
+    """
     giga = [r for r in results if r.engine == 'gigaam']
     if not giga:
         raise ValueError('нет результатов GigaAM')
-    return min(giga, key=lambda r: (r.wer, -r.names_recall, r.hours_per_audio_hour))
+    whisper_cpu, fits = pick_whisper_cpu(results, window_hours, meeting_hours)
+    scored = [(decide(g, whisper_cpu, window_hours, meeting_hours), g) for g in giga]
+    decision, best = min(
+        scored, key=lambda dg: (_RANK[dg[0]], dg[1].wer, -dg[1].names_recall, dg[1].hours_per_audio_hour)
+    )
+    if not fits and decision == Decision.WHISPER:
+        decision = Decision.WAIT_FOR_GPU
+    return decision, best, whisper_cpu, fits
 
 
 _VERDICT = {
@@ -120,9 +138,15 @@ def render_report(
     *,
     whisper_cpu: CompareResult,
     gigaam: CompareResult,
-    whisper_cpu_fits: bool = True,
+    whisper_cpu_fits: bool,
 ) -> str:
     """Отчёт: только метрики, текста записей в нём нет."""
+    verdict = _VERDICT[decision]
+    if not whisper_cpu_fits:
+        verdict = (
+            'Ни одна модель Whisper не укладывается в окно: к утру не успевает ничего. '
+            + verdict
+        )
     lines = [
         f'# Сравнение моделей распознавания, {date}',
         '',
@@ -143,12 +167,12 @@ def render_report(
         f'База whisper_cpu: {whisper_cpu.model}.',
     ]
     if not whisper_cpu_fits:
-        lines.append('Ни одна модель Whisper не укладывается в окно. Взята самая малая.')
+        lines.append('Ни одна модель Whisper не укладывается в окно. Базой взята самая крупная.')
     lines.append('Модель large-v3 в отчёте для справки, если она не выбрана базой.')
     lines += [
         f'Лучший GigaAM: {gigaam.model}.',
         '',
-        f'Решение: {decision.name}. {_VERDICT[decision]}',
+        f'Решение: {decision.name}. {verdict}',
         '',
         'Колонку «полнота задач против протокола» заполняет владелец реестра после задачи 15.',
         '',

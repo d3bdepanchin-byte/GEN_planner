@@ -5,9 +5,9 @@ from planerka.asr.compare import (
     CompareResult,
     Decision,
     decide,
+    decide_overall,
     fragment_text,
     names_recall,
-    pick_gigaam,
     pick_whisper_cpu,
     render_report,
     wer,
@@ -114,22 +114,9 @@ def test_pick_whisper_cpu_includes_large_when_it_fits():
     assert pick_whisper_cpu(res, 14, 2)[0].model == 'large-v3'
 
 
-def test_pick_whisper_cpu_none_fits_falls_back_to_smallest_flagged():
-    res = [_w('medium', 9.0), _w('small', 8.0)]
-    picked, fits = pick_whisper_cpu(res, 14, 2)
-    assert (picked.model, fits) == ('small', False)
-
-
 def test_pick_whisper_cpu_ignores_other_engines():
     res = [g(0.1, 0.9, 1.0), _w('small', 1.0)]
     assert pick_whisper_cpu(res, 14, 2)[0].engine == 'whisper'
-
-
-def test_pick_gigaam_best_quality_then_speed():
-    a = CompareResult('gigaam', 'v3_e2e_rnnt', 0.15, 0.80, 2.0)
-    b = CompareResult('gigaam', 'v3_e2e_ctc', 0.15, 0.85, 1.0)
-    c = CompareResult('gigaam', 'v3_e2e_x', 0.18, 0.99, 0.5)
-    assert pick_gigaam([a, c, b]) is b
 
 
 def test_render_report_is_metrics_only():
@@ -143,11 +130,48 @@ def test_render_report_is_metrics_only():
     assert '14' in md and '2' in md
 
 
-def test_render_report_flags_when_nothing_fits_window():
+def _gv(model, w, n, speed):
+    return CompareResult('gigaam', model, w, n, speed)
+
+
+def test_overall_slow_best_wer_variant_does_not_hide_fast_passing_variant():
+    res = [_w('medium', 1.0), _gv('v3_e2e_rnnt', 0.15, 0.80, 8.0), _gv('v3_e2e_ctc', 0.16, 0.80, 1.0)]
+    res[0] = CompareResult('whisper', 'medium', 0.20, 0.70, 1.0)
+    d, giga, _, _ = decide_overall(res, 14, 2)
+    assert (d, giga.model) == (Decision.GIGAAM, 'v3_e2e_ctc')
+
+
+def test_overall_lowest_wer_variant_failing_names_does_not_hide_passing_one():
+    res = [CompareResult('whisper', 'medium', 0.20, 0.70, 1.0),
+           _gv('v3_e2e_rnnt', 0.10, 0.60, 1.0), _gv('v3_e2e_ctc', 0.15, 0.80, 1.0)]
+    d, giga, _, _ = decide_overall(res, 14, 2)
+    assert (d, giga.model) == (Decision.GIGAAM, 'v3_e2e_ctc')
+
+
+def test_overall_tie_broken_by_wer_then_names_then_speed():
+    res = [CompareResult('whisper', 'medium', 0.20, 0.70, 1.0),
+           _gv('v3_e2e_rnnt', 0.15, 0.80, 2.0), _gv('v3_e2e_ctc', 0.12, 0.75, 3.0)]
+    assert decide_overall(res, 14, 2)[1].model == 'v3_e2e_ctc'
+
+
+def test_overall_nothing_fits_uses_largest_whisper_and_waits_for_gpu():
+    res = [_w('small', 9.0), _w('medium', 10.0), _gv('v3_e2e_rnnt', 0.30, 0.10, 1.0)]
+    d, _, base, fits = decide_overall(res, 14, 2)
+    assert (base.model, fits, d) == ('medium', False, Decision.WAIT_FOR_GPU)
+
+
+def test_pick_whisper_cpu_none_fits_is_largest_flagged():
+    picked, fits = pick_whisper_cpu([_w('medium', 9.0), _w('small', 8.0)], 14, 2)
+    assert (picked.model, fits) == ('medium', False)
+
+
+def test_render_report_states_nothing_fits_in_decision_line():
     res = [_w('small', 9.0), CompareResult('gigaam', 'v3_e2e_rnnt', 0.15, 0.80, 2.0)]
-    md = render_report('2026-11-08', res, Decision.WHISPER, 14, 2,
+    md = render_report('2026-11-08', res, Decision.WAIT_FOR_GPU, 14, 2,
                        whisper_cpu=res[0], gigaam=res[1], whisper_cpu_fits=False)
-    assert 'не укладывается' in md
+    line = next(l for l in md.splitlines() if l.startswith('Решение:'))
+    assert 'WAIT_FOR_GPU' in line and 'ни одна модель whisper не укладывается в окно' in line.lower()
+    assert 'Берём Whisper' not in md
 
 
 def test_tool_runs_end_to_end_with_fake_transcribers(tmp_path, env):

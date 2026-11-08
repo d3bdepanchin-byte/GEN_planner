@@ -27,11 +27,9 @@ from planerka.asr.base import Transcript, Transcriber
 from planerka.asr.compare import (
     WHISPER_SIZES,
     CompareResult,
-    decide,
+    decide_overall,
     fragment_text,
     names_recall,
-    pick_gigaam,
-    pick_whisper_cpu,
     render_report,
     wer,
 )
@@ -95,9 +93,7 @@ def run(
               f'speed={r.hours_per_audio_hour:.2f}', file=sys.stderr)
         results.append(r)
 
-    whisper_cpu, fits = pick_whisper_cpu(results, window, meeting)
-    gigaam = pick_gigaam(results)
-    decision = decide(gigaam, whisper_cpu, window, meeting)
+    decision, gigaam, whisper_cpu, fits = decide_overall(results, window, meeting)
     today = date.today().isoformat()
     report = render_report(today, results, decision, window, meeting,
                            whisper_cpu=whisper_cpu, gigaam=gigaam, whisper_cpu_fits=fits)
