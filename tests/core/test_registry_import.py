@@ -42,11 +42,11 @@ def directory(session, tmp_path):
 @pytest.fixture
 def registry_xlsx(tmp_path):
     return _book(tmp_path / 'reg.xlsx', [
-        ['И-011', 'Обновить прайс', 'задача', 'высокий', 'Цель А', 'Смирнов Артем',
+        ['И-011', 'Обновить прайс', 'поручение', 'высокий', 'Цель А', 'Смирнов Артем',
          date(2026, 12, 1), '15.12.2026', 'Прайс выложен', 'в работе'],
-        [40, 'Закупить стеллажи', 'задача', 'обычный', None, 'Неизвестный Иван',
+        [40, 'Закупить стеллажи', 'проект', 'обычный', None, 'Неизвестный Иван',
          None, None, None, 'выполнена'],
-        ['И-072', 'Инвентаризация', 'поручение', None, None, 'Иванова Ольга',
+        ['И-072', 'Инвентаризация', 'регламент', None, None, 'Иванова Ольга',
          'завтра', None, None, 'непонятно'],
     ])
 
@@ -77,7 +77,7 @@ def test_known_owner_matched_ignoring_yo_and_case(session, directory, registry_x
 
 
 def test_ambiguous_owner_left_empty_with_question(session, directory, tmp_path):
-    p = _book(tmp_path / 'a.xlsx', [[5, 'Задача', 'задача', None, None, 'Иванов', None, None, None, 'в работе']])
+    p = _book(tmp_path / 'a.xlsx', [[5, 'Задача', 'поручение', None, None, 'Иванов', None, None, None, 'в работе']])
     import_registry(session, p, MAPPING)
     t = _task(session, 5)
     assert t.owner_id is None
@@ -99,7 +99,7 @@ def test_history_row_per_task(session, directory, registry_xlsx):
 
 
 def test_bad_number_row_skipped_with_problem_without_names(session, directory, tmp_path):
-    p = _book(tmp_path / 'b.xlsx', [['abc', 'Секрет', 'задача', None, None, None, None, None, None, None]])
+    p = _book(tmp_path / 'b.xlsx', [['abc', 'Секрет', 'поручение', None, None, None, None, None, None, None]])
     rep = import_registry(session, p, MAPPING)
     assert rep.created == 0
     assert rep.problems == ['строка 2: не удалось разобрать номер']
@@ -115,3 +115,11 @@ def test_reimport_is_idempotent(session, directory, registry_xlsx):
     rep = import_registry(session, registry_xlsx, MAPPING)
     assert (rep.created, rep.updated) == (0, 3)
     assert len(session.scalars(select(Task)).all()) == 3
+
+
+def test_empty_type_stays_empty_with_question(session, directory, tmp_path):
+    p = _book(tmp_path / 't.xlsx', [[7, 'Задача', None, None, None, 'Иванова Ольга', None, None, None, 'в работе']])
+    import_registry(session, p, MAPPING)
+    t = _task(session, 7)
+    assert t.type is None
+    assert 'тип не указан: уточнить' in t.questions

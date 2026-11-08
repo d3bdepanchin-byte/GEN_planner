@@ -17,6 +17,7 @@ from planerka.db.models import History, Task
 MAPPING_PATH = Path("config/registry_mapping.toml")
 Q_OWNER_MISSING = "ответственный не найден в справочнике"
 Q_OWNER_AMBIGUOUS = "ответственный неоднозначен: выбрать при утверждении"
+Q_TYPE = "тип не указан: уточнить"
 Q_STATUS = "статус не распознан: уточнить"
 
 
@@ -139,7 +140,9 @@ def import_registry(session: Session, path: Path, mapping: RegistryMapping,
             report.updated += 1
         old_status = None if is_new else task.status
         task.title = title
-        task.type = _text(row, idx, mapping.type) or "задача"
+        task.type = _text(row, idx, mapping.type)
+        if task.type is None:
+            questions.append(Q_TYPE)
         task.priority = _text(row, idx, mapping.priority)
         task.goal_2027 = _text(row, idx, mapping.goal_2027)
         task.owner_id = owner_id

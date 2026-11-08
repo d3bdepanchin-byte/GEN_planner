@@ -92,7 +92,7 @@ with warnings.catch_warnings():
         id: Mapped[int] = mapped_column(primary_key=True)
         number: Mapped[int] = mapped_column(Integer, unique=True)
         title: Mapped[str] = mapped_column(Text)
-        type: Mapped[str] = mapped_column(Text)
+        type: Mapped[str | None] = mapped_column(Text)
         priority: Mapped[str | None] = mapped_column(Text)
         goal_2027: Mapped[str | None] = mapped_column(Text)
         author_id: Mapped[int | None] = mapped_column(ForeignKey("employee.id"))
