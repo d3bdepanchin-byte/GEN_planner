@@ -24,8 +24,8 @@ from planerka.pipeline.deps import Deps
 from planerka.pipeline.jobs import enqueue
 from planerka.pipeline.worker import run_once
 from planerka.settings import PROJECT_ROOT, Env, set_setting
-from samples import (DEV, EXPECTED_CANDIDATES, MEETING, NO_PHRASE, ONE_ON_ONE, PLANERKA, SILENCE,
-                     TWO_CANDIDATES, PassThroughMasker, tasks_of)
+from samples import (DEV, EXPECTED_CANDIDATES, INBOX_NAME, MEETING, NO_PHRASE, ONE_ON_ONE,
+                     PLANERKA, SILENCE, TWO_CANDIDATES, PassThroughMasker, tasks_of)
 
 
 @dataclass
@@ -120,6 +120,7 @@ def source_ready(session, env, audio, host, executor, registry_owner):
     folder = env.data_dir / 'meetings' / str(s.id)
     folder.mkdir(parents=True)
     shutil.copyfile(audio, folder / 'original.mp3')
+    (folder / 'inbox_name.txt').write_text(INBOX_NAME, encoding='utf-8')
     s.path = str(folder / 'original.mp3')
     enqueue(session, 'transcribe', {'source_id': s.id})
     session.flush()

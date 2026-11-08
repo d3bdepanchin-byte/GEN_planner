@@ -40,6 +40,7 @@ class Deps:
     inbox: ServiceInbox
     prompt: Prompt = field(default_factory=_extract_prompt)
     scanner: IntakeScanner | None = None  # создаётся при первом scan_inbox, живёт с воркером
+    mail_failures: dict[str, int] = field(default_factory=dict)  # Message-ID → неудач подряд
 
     def intake(self) -> IntakeScanner:
         """Наблюдения за приёмником живут в памяти между проходами (окно стабильности)."""

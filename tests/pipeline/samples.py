@@ -4,12 +4,13 @@ from datetime import date
 
 from sqlalchemy import select
 
-from planerka.asr.base import Segment, Transcript
+from planerka.asr.base import Segment, Transcript, TranscriptionFailed
 from planerka.db.models import Task
 from planerka.masking.masker import MaskResult
 
 MEETING = date(2026, 11, 11)
 DEV = 'dev@example.test'
+INBOX_NAME = 'планёрка 11 ноября.m4a'
 
 
 def transcript(*lines: str) -> Transcript:
@@ -57,6 +58,13 @@ TWO_CANDIDATES = llm_result([
 ])
 EXPECTED_CANDIDATES = 2
 
+
+
+class BrokenFileTranscriber:
+    """Запись не распознаётся (битый файл): ошибка не временная."""
+
+    def transcribe(self, wav):
+        raise TranscriptionFailed('broken')
 
 
 class PassThroughMasker:

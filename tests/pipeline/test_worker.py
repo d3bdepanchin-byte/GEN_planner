@@ -9,10 +9,12 @@ from planerka.db.models import Job, ReviewFile, Source
 from planerka.llm.base import JsonLLMBase, LLMUnavailable
 from planerka.mail.base import IncomingMail
 from planerka.mail.fake import FakeInbox
-from planerka.pipeline.jobs import enqueue, ensure_periodic, recover_running
-from planerka.pipeline.worker import run_once
+from planerka.pipeline import worker
+from planerka.pipeline.jobs import enqueue, ensure_periodic
+from planerka.pipeline.worker import WorkerState, recover_interrupted, run_once, worker_cycle
 from planerka.settings import set_setting
-from samples import DEV, EXPECTED_CANDIDATES, PLANERKA, TWO_CANDIDATES, tasks_of
+from samples import (DEV, EXPECTED_CANDIDATES, INBOX_NAME, PLANERKA, TWO_CANDIDATES,
+                     BrokenFileTranscriber, tasks_of)
 
 
 def test_masking_uncertain_never_calls_llm(session, deps_leaky_text, source_ready, run_until_idle):
@@ -22,6 +24,7 @@ def test_masking_uncertain_never_calls_llm(session, deps_leaky_text, source_read
     assert deps_leaky_text.mailer.sent
     assert deps_leaky_text.mailer.sent[-1]['to'] == DEV
     assert 'Смирнов' not in deps_leaky_text.mailer.sent[-1]['body']
+    assert f'planerka requeue {source_ready.id}' in deps_leaky_text.mailer.sent[-1]['body']
 
 
 def test_one_on_one_deferred_in_1a(session, deps_one_on_one, source_ready, run_until_idle):
@@ -36,7 +39,37 @@ def test_not_a_meeting_asks_host(session, deps_no_phrase, source_ready, host, ru
     run_until_idle(session, deps_no_phrase)
     assert session.get(Source, source_ready.id).status == 'не встреча'
     assert deps_no_phrase.mailer.sent[-1]['to'] == host.email
-    assert len(deps_no_phrase.mailer.sent) == 1
+    alerts = [m for m in deps_no_phrase.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 1
+    assert f'planerka requeue {source_ready.id} --as-planerka' in alerts[0]['body']
+
+
+def test_not_a_meeting_mail_text(session, deps_no_phrase, source_ready, host, run_until_idle):
+    run_until_idle(session, deps_no_phrase)
+    mail = deps_no_phrase.mailer.sent[-1]
+    body = mail['body']
+    assert '11.11.2026' in mail['subject'] and f'«{INBOX_NAME}»' in body and '11.11.2026' in body
+    assert f'Если это планёрка — перешлите это письмо на {DEV}.' in body
+    assert ('Чтобы запись разобралась автоматически, планёрку начинают с фразы '
+            '«Начинаем планёрку».') in body
+    assert 'На это письмо не отвечайте: ящик читает только система.' in body
+    assert 'источник' not in body.lower() and 'Следующую' not in body
+
+
+def test_host_mail_without_developer_email(session, deps_no_phrase, source_ready, host,
+                                           run_until_idle):
+    set_setting(session, 'alerts.developer_email', '', 'test')
+    run_until_idle(session, deps_no_phrase)
+    assert 'перешлите' not in deps_no_phrase.mailer.sent[-1]['body']
+
+
+def test_no_speech_mail_text(session, deps_silence, source_ready, host, run_until_idle):
+    run_until_idle(session, deps_silence)
+    body = deps_silence.mailer.sent[-1]['body']
+    assert f'«{INBOX_NAME}»' in body
+    assert 'Если файл не тот — положите в папку правильную запись.' in body
+    assert 'На это письмо не отвечайте: ящик читает только система.' in body
+    assert 'ещё раз' not in body
 
 
 def test_no_speech_marks_source_and_mails_host(session, deps_silence, source_ready, host,
@@ -64,13 +97,38 @@ def test_host_mail_retried_without_new_transcription(session, deps_no_phrase, so
     assert [m['to'] for m in deps_no_phrase.mailer.sent] == [host.email]
 
 
-def test_transcriber_down_retried_then_alert(session, deps_asr_down, source_ready, run_until_idle):
-    run_until_idle(session, deps_asr_down)
+def _run_attempts(session, deps, clock, kind, n):
+    """n запусков задания: часы каждый раз переводятся к его run_after."""
+    pauses = []
+    for _ in range(n):
+        run_once(session, deps, clock.now)
+        job = session.scalars(select(Job).where(Job.kind == kind)).one()
+        pauses.append(job.run_after - clock.now)
+        clock.now = job.run_after
+    return job, pauses
+
+
+def test_transcriber_down_keeps_source_queued(session, deps_asr_down, source_ready, clock):
+    set_setting(session, 'jobs.max_pause_min', 4, 'test')
+    job, pauses = _run_attempts(session, deps_asr_down, clock, 'transcribe', 8)
+    assert (job.attempts, job.status) == (8, 'pending')
+    assert pauses == [timedelta(minutes=m) for m in (1, 2, 4, 4, 4, 4, 4, 4)]
+    alerts = [m for m in deps_asr_down.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 1  # ровно один, когда попыток стало jobs.max_attempts
+    assert 'TranscriberUnavailable' in alerts[0]['body']
+    assert str(source_ready.id) in alerts[0]['body']
+    assert session.get(Source, source_ready.id).status == 'получен'
+
+
+def test_broken_file_stops_with_alert(session, make_deps, source_ready, run_until_idle):
+    deps = make_deps(None)
+    deps.transcriber = BrokenFileTranscriber()
+    run_until_idle(session, deps)
     job = session.scalars(select(Job).where(Job.kind == 'transcribe')).one()
-    assert (job.attempts, job.status) == (5, 'failed') and deps_asr_down.mailer.sent
-    alert = deps_asr_down.mailer.sent[-1]
-    assert alert['to'] == DEV and 'TranscriberUnavailable' in alert['body']
-    assert str(source_ready.id) in alert['body']
+    assert (job.attempts, job.status) == (5, 'failed')
+    alert = deps.mailer.sent[-1]
+    assert alert['to'] == DEV and 'TranscriptionFailed' in alert['body']
+    assert f'planerka requeue {source_ready.id}' in alert['body']
 
 
 def test_retry_pause_doubles(session, deps_asr_down, source_ready, clock):
@@ -85,9 +143,11 @@ def test_retry_pause_doubles(session, deps_asr_down, source_ready, clock):
     assert clock.now - t0 == timedelta(minutes=15)
 
 
-def test_max_attempts_is_a_setting(session, deps_asr_down, source_ready, run_until_idle):
+def test_max_attempts_is_a_setting(session, make_deps, source_ready, run_until_idle):
     set_setting(session, 'jobs.max_attempts', 2, 'test')
-    run_until_idle(session, deps_asr_down)
+    deps = make_deps(None)
+    deps.transcriber = BrokenFileTranscriber()
+    run_until_idle(session, deps)
     job = session.scalars(select(Job).where(Job.kind == 'transcribe')).one()
     assert (job.attempts, job.status) == (2, 'failed')
 
@@ -102,15 +162,16 @@ class DownLLM(JsonLLMBase):
         raise LLMUnavailable('LLM: статус 529')
 
 
-def test_llm_unavailable_retried_then_alert(session, make_deps, source_ready, run_until_idle):
+def test_llm_unavailable_keeps_source_queued(session, make_deps, source_ready, clock):
     deps = make_deps(PLANERKA, llm=DownLLM())
-    run_until_idle(session, deps)
-    job = session.scalars(select(Job).where(Job.kind == 'extract')).one()
-    assert (job.attempts, job.status) == (5, 'failed')
-    assert len(deps.llm.requests) == 5
+    run_once(session, deps, clock.now)  # распознавание → разбор → LLM недоступен
+    clock.now = session.scalars(select(Job).where(Job.kind == 'extract')).one().run_after
+    job, _ = _run_attempts(session, deps, clock, 'extract', 6)
+    assert (job.attempts, job.status) == (7, 'pending')
     assert session.get(Source, source_ready.id).status == 'распознан'
     assert tasks_of(session, source_ready) == []
-    assert 'LLMUnavailable' in deps.mailer.sent[-1]['body']
+    alerts = [m for m in deps.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 1 and 'LLMUnavailable' in alerts[0]['body']
 
 
 def test_duplicate_job_is_idempotent(session, deps, source_ready, run_until_idle):
@@ -220,7 +281,7 @@ def test_poll_mail_marks_done_after_accept(session, deps, settings, clock):
     assert deps.mailer.sent[-1]['in_reply_to'] == '<m1@example.test>'  # подсказка: нет .xlsx
 
 
-def test_poll_mail_failure_not_marked_and_retried(session, deps, settings, clock, monkeypatch):
+def test_poll_mail_failure_not_marked(session, deps, settings, clock, monkeypatch):
     deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл'),
                             IncomingMail('<m2@example.test>', 'b@example.test', 'Re: файл')])
     real = deps.mailer.send
@@ -232,9 +293,52 @@ def test_poll_mail_failure_not_marked_and_retried(session, deps, settings, clock
     monkeypatch.setattr(deps.mailer, 'send', flaky)
     enqueue(session, 'poll_mail', {})
     run_once(session, deps, clock.now)
-    assert deps.inbox.done == ['<m2@example.test>']
+    assert deps.inbox.done == ['<m2@example.test>']  # m1 перечитается при следующем опросе
     job = session.scalars(select(Job).where(Job.kind == 'poll_mail')).one()
-    assert (job.status, job.attempts) == ('pending', 1)
+    assert job.status == 'done'
+
+
+def test_poison_mail_set_aside_with_one_alert(session, deps, settings, clock, monkeypatch):
+    deps.inbox = FakeInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл')])
+    real = deps.mailer.send
+
+    def refused(to, *a, **kw):
+        if to == 'a@example.test':
+            raise OSError('recipient refused')
+        return real(to, *a, **kw)
+    monkeypatch.setattr(deps.mailer, 'send', refused)
+    for i in range(7):
+        enqueue(session, 'poll_mail', {})
+        run_once(session, deps, clock.now + timedelta(minutes=i))
+        assert deps.inbox.done == ([] if i < 4 else ['<m1@example.test>'])
+    alerts = [m for m in deps.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 1 and 'OSError' in alerts[0]['body']
+    assert all(j.status == 'done' for j in session.scalars(select(Job)))
+
+
+class DownInbox:
+    def __init__(self, error):
+        self.error = error
+
+    def fetch_new(self):
+        raise self.error
+
+    def mark_done(self, message_id):
+        raise AssertionError
+
+
+def test_periodic_failure_alerted_once_per_error_type(session, deps, settings, clock):
+    set_setting(session, 'jobs.max_attempts', 1, 'test')
+    deps.inbox = DownInbox(OSError('imap down'))
+    for i in range(3):
+        enqueue(session, 'poll_mail', {})
+        run_once(session, deps, clock.now + timedelta(minutes=i))
+    assert len([m for m in deps.mailer.sent if m['to'] == DEV]) == 1
+    deps.inbox = DownInbox(ValueError('other'))
+    enqueue(session, 'poll_mail', {})
+    run_once(session, deps, clock.now + timedelta(minutes=5))
+    alerts = [m for m in deps.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 2 and 'ValueError' in alerts[-1]['body']
 
 
 def test_reminders_job_runs_reminders(session, deps, processed_source, executor, clock):
@@ -255,6 +359,9 @@ def test_scan_inbox_enqueues_transcribe(session, deps, env, audio, clock):
     source = session.scalars(select(Source)).one()
     job = session.scalars(select(Job).where(Job.kind == 'transcribe')).one()
     assert job.payload == {'source_id': source.id}
+    name = env.data_dir / 'meetings' / str(source.id) / 'inbox_name.txt'
+    assert name.read_text(encoding='utf-8') == 'запись.mp3'  # имя файла — на сервере, не в БД
+    assert 'запись' not in str(source.flags)
 
 
 PERIODIC = {'scan_inbox', 'poll_mail', 'reminders', 'owner_digest'}
@@ -278,12 +385,43 @@ def test_periodic_next_run_after_interval(session, clock):
     assert nxt.run_after == clock.now + timedelta(seconds=120)
 
 
-def test_recover_running_returns_jobs_to_queue(session):
+def test_interrupted_job_counts_attempt(session, deps, settings, clock):
     job = enqueue(session, 'extract', {'source_id': 1})
     job.status = 'running'
     session.flush()
-    assert recover_running(session) == 1
-    assert job.status == 'pending'
+    assert recover_interrupted(session, deps, clock.now) == 1
+    assert (job.status, job.attempts, job.last_error) == ('pending', 1, 'JobInterrupted')
+    assert job.run_after == clock.now + timedelta(minutes=1)
+
+
+def test_interrupted_job_at_limit_fails_with_alert(session, deps, settings, clock):
+    job = enqueue(session, 'transcribe', {'source_id': 7})
+    job.status, job.attempts = 'running', 4
+    session.flush()
+    recover_interrupted(session, deps, clock.now)
+    assert (job.status, job.attempts) == ('failed', 5)
+    assert 'JobInterrupted' in deps.mailer.sent[-1]['body']
+    assert 'planerka requeue 7' in deps.mailer.sent[-1]['body']
+
+
+def test_cycle_recovers_job_left_running_by_db_failure(session, deps_asr_down, source_ready,
+                                                     clock, monkeypatch):
+    state = WorkerState(needs_recovery=False)
+    real = worker._retry_or_fail
+
+    def db_down(*a, **kw):
+        raise OSError('db connection lost')
+    monkeypatch.setattr(worker, '_retry_or_fail', db_down)
+    worker_cycle(session, deps_asr_down, state, clock.now)
+    job = session.scalars(select(Job).where(Job.kind == 'transcribe')).one()
+    assert job.status == 'running' and state.needs_recovery
+
+    monkeypatch.setattr(worker, '_retry_or_fail', real)
+    worker_cycle(session, deps_asr_down, state, clock.now + timedelta(seconds=30))
+    assert (job.status, job.attempts) == ('pending', 1)
+    assert not state.needs_recovery
+    periodic = session.scalars(select(Job).where(Job.kind == 'poll_mail')).all()
+    assert periodic  # периодические задания снова ставятся
 
 
 def test_unknown_job_kind_rejected(session):

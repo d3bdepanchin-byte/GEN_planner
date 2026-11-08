@@ -13,6 +13,9 @@ def test_parser_knows_all_commands():
     assert p.parse_args(['import-registry', 'reg.xlsx']).closed is False
     assert p.parse_args(['backup']).command == 'backup'
     assert p.parse_args(['restore-check', 'b.dump.gpg']).path.name == 'b.dump.gpg'
+    args = p.parse_args(['requeue', '5', '--as-planerka'])
+    assert (args.source_id, args.as_planerka) == (5, True)
+    assert p.parse_args(['requeue', '5']).as_planerka is False
 
 
 def test_unknown_command_exits():

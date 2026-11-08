@@ -5,7 +5,7 @@
 """
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from planerka.db.models import Job
@@ -60,10 +60,3 @@ def claim_next(session: Session, now: datetime) -> Job | None:
     return session.scalars(
         select(Job).where(Job.status == PENDING, Job.run_after <= now)
         .order_by(Job.run_after, Job.id).limit(1).with_for_update(skip_locked=True)).first()
-
-
-def recover_running(session: Session) -> int:
-    """После перезапуска воркера: прерванные задания — снова в очередь. Число заданий."""
-    result = session.execute(update(Job).where(Job.status == RUNNING).values(status=PENDING)
-                             .execution_options(synchronize_session='fetch'))
-    return result.rowcount

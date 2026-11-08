@@ -15,7 +15,7 @@ from planerka.db.models import Employee, ReviewFile, Source, Task
 from planerka.extract.run import EXTRACTED
 from planerka.mail.accept import accept_review_mail
 from planerka.pipeline.deps import Deps
-from planerka.pipeline.handlers.common import alert, ru_date
+from planerka.pipeline.handlers.common import alert, requeue_hint, ru_date
 from planerka.pipeline.transcripts import meeting_dir
 from planerka.reminders import company_tz, run_reminders, set_due
 from planerka.review.executor import build_executor_file
@@ -25,10 +25,6 @@ from planerka.settings import get_setting
 log = logging.getLogger(__name__)
 
 OWNER_ALERTED = 'алерт: владелец реестра не задан'  # флаг источника: алерт уже ушёл
-
-
-class MailBatchIncomplete(Exception):
-    """Часть писем служебного ящика не обработана; они остались во входящих."""
 
 
 def _in_executor_files(session: Session, numbers: list[int]) -> list[ReviewFile]:
@@ -61,7 +57,8 @@ def send_reviews(session: Session, deps: Deps, payload: dict, now: datetime) -> 
         employee = session.get(Employee, owner_id)
         if not employee.email:
             alert(session, deps, 'send_reviews', source.id,
-                  f'нет e-mail исполнителя, задач {len(items)}')
+                  f'нет e-mail исполнителя, задач {len(items)}; после правки e-mail — '
+                  f'{requeue_hint(source.id)}')
             continue
         rf = build_executor_file(session, employee, items,
                                  meeting_dir(deps.env, source.id) / 'review')
@@ -80,22 +77,40 @@ def send_reviews(session: Session, deps: Deps, payload: dict, now: datetime) -> 
 
 
 def poll_mail(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
-    """Ответы на файлы. Письмо помечается обработанным только после фиксации в БД."""
-    failed = 0
+    """Ответы на файлы. Письмо помечается обработанным только после фиксации в БД.
+
+    Неудачное письмо остаётся во входящих и перечитывается при следующем опросе; после
+    jobs.max_attempts неудач подряд оно убирается без ответа и уходит один алерт.
+    """
+    limit = int(get_setting(session, 'jobs.max_attempts'))
     for mail in deps.inbox.fetch_new():
         try:
             outcome = accept_review_mail(session, mail, deps.mailer,
                                          own_address=deps.env.service_mailbox)
             session.commit()
-        except Exception as e:  # noqa: BLE001 — письмо остаётся во входящих до следующего раза
+        except Exception as e:  # noqa: BLE001 — одно письмо не должно останавливать ящик
             session.rollback()
-            failed += 1
-            log.error('письмо не обработано: %s', type(e).__name__)
+            _mail_failed(session, deps, mail.message_id, type(e).__name__, limit)
             continue
+        deps.mail_failures.pop(mail.message_id, None)
         deps.inbox.mark_done(mail.message_id)
         log.info('письмо обработано: %s', outcome.value)
-    if failed:
-        raise MailBatchIncomplete(f'не обработано писем: {failed}')
+
+
+def _mail_failed(session: Session, deps: Deps, message_id: str, error: str, limit: int) -> None:
+    count = deps.mail_failures.get(message_id, 0) + 1
+    deps.mail_failures[message_id] = count
+    log.error('письмо не обработано: %s, попытка %d', error, count)
+    if count < limit:
+        return
+    try:
+        deps.inbox.mark_done(message_id)
+    except Exception as e:  # noqa: BLE001 — не убралось: попробуем при следующем опросе
+        log.error('письмо не убрано из входящих: %s', type(e).__name__)
+        return
+    deps.mail_failures.pop(message_id, None)
+    alert(session, deps, 'poll_mail', None,
+          f'письмо не обработано {count} раз ({error}), убрано из входящих без ответа')
 
 
 def reminders(session: Session, deps: Deps, payload: dict, now: datetime) -> None:

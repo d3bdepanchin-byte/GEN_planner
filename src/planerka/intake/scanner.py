@@ -22,6 +22,7 @@ from planerka.settings import get_setting
 log = logging.getLogger(__name__)
 
 _CHUNK = 1024 * 1024
+INBOX_NAME_FILE = "inbox_name.txt"
 
 
 def sha256_file(path: Path) -> str:
@@ -107,6 +108,8 @@ class IntakeScanner:
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target = target_dir / f"original{path.suffix}"
                 shutil.copyfile(path, target)
+                # Имя файла — для письма ведущему; в папке встречи на сервере, не в БД.
+                (target_dir / INBOX_NAME_FILE).write_text(path.name, encoding="utf-8")
                 digest = sha256_file(target)  # хеш именно сохранённой копии
                 if session.scalar(select(Source.id).where(Source.sha256 == digest)) is not None:
                     raise _Duplicate

@@ -28,5 +28,11 @@ def alert(session: Session, deps: Deps, kind: str, source_id: int | None, detail
                            detail, load_directory(session))
 
 
+def requeue_hint(source_id: int, as_planerka: bool = False) -> str:
+    """Команда повтора для алерта разработчику."""
+    flag = ' --as-planerka' if as_planerka else ''
+    return f'повтор вручную: planerka requeue {source_id}{flag}'
+
+
 def ru_date(d: date | None) -> str:
     return d.strftime('%d.%m.%Y') if d is not None else 'без даты'

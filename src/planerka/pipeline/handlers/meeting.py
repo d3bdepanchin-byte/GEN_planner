@@ -14,11 +14,12 @@ from planerka.asr.filter import MeetingKind, detect_meeting_kind
 from planerka.db.models import Employee, Source
 from planerka.extract.run import ExtractDeps, extract_source
 from planerka.intake.audio import extract_audio
+from planerka.intake.scanner import INBOX_NAME_FILE
 from planerka.masking.checker import MaskingUncertain
 from planerka.pipeline.deps import Deps
 from planerka.pipeline.handlers.common import (
     DEFERRED_1B, KIND_ONE_ON_ONE, KIND_PLANERKA, MASKING_UNCERTAIN, NO_SPEECH, NOT_A_MEETING,
-    RECEIVED, TRANSCRIBED, alert, ru_date,
+    RECEIVED, TRANSCRIBED, alert, requeue_hint, ru_date,
 )
 from planerka.pipeline.jobs import EXTRACT, SEND_REVIEWS, TRANSCRIBE, enqueue
 from planerka.pipeline.transcripts import load_transcript, meeting_dir, save_transcript
@@ -76,24 +77,38 @@ def transcribe(session: Session, deps: Deps, payload: dict, now: datetime) -> No
     log.info('источник %s распознан: %s', source.id, source.status)
     if source.status in (NO_SPEECH, NOT_A_MEETING):
         session.commit()  # статус сохранён до письма: повтор не распознаёт заново
+        if source.status == NOT_A_MEETING:  # ведущий может переслать письмо: номер — здесь
+            alert(session, deps, NOT_A_MEETING, source.id,
+                  f'нет фразы открытия, запись от {ru_date(source.meeting_date)}; если ведущий '
+                  f'подтвердит планёрку — {requeue_hint(source.id, as_planerka=True)}')
         _ask_host(session, deps, source)
 
 
-def _host_message(session: Session, source: Source) -> tuple[str, str]:
+NO_REPLY = 'На это письмо не отвечайте: ящик читает только система.'
+
+
+def _recording(deps: Deps, source: Source, when: str) -> str:
+    """«записи «имя файла» от дата» — имя из папки встречи на сервере, если есть."""
+    path = meeting_dir(deps.env, source.id) / INBOX_NAME_FILE
+    name = path.read_text(encoding='utf-8').strip() if path.is_file() else ''
+    return f'записи «{name}» от {when}' if name else f'записи от {when}'
+
+
+def _host_message(session: Session, deps: Deps, source: Source) -> tuple[str, str]:
     when = ru_date(source.meeting_date)
+    recording = _recording(deps, source, when)
+    developer = get_setting(session, 'alerts.developer_email')
+    forward = [f'Если это планёрка — перешлите это письмо на {developer}.'] if developer else []
     if source.status == NO_SPEECH:
-        return (f'Запись {when}: нет речи',
-                f'В записи от {when} (источник № {source.id}) не распознана речь. '
-                'Задачи из неё не созданы.\n'
-                'Если это была планёрка, проверьте запись и положите файл в папку '
-                '«Записи встреч» ещё раз.\n')
+        lines = [f'В {recording} не распознана речь, задачи не созданы.',
+                 'Если файл не тот — положите в папку правильную запись.', *forward]
+        return f'Запись {when}: нет речи', '\n'.join([*lines, NO_REPLY]) + '\n'
     phrases = list(get_setting(session, 'intake.opening_phrases.planerka'))
     phrase = phrases[0][:1].upper() + phrases[0][1:] if phrases else ''
-    return (f'Запись {when}: нет фразы открытия',
-            f'В начале записи от {when} (источник № {source.id}) нет фразы «{phrase}». '
-            'Запись не разобрана, задачи не созданы.\n'
-            'Если это была планёрка, сообщите разработчику номер источника — запись разберут '
-            f'вручную. Следующую планёрку начните с фразы «{phrase}».\n')
+    lines = [f'В начале {recording} нет фразы открытия: запись не разобрана, задачи не созданы.',
+             *forward,
+             f'Чтобы запись разобралась автоматически, планёрку начинают с фразы «{phrase}».']
+    return f'Запись {when}: нет фразы открытия', '\n'.join([*lines, NO_REPLY]) + '\n'
 
 
 def _ask_host(session: Session, deps: Deps, source: Source) -> None:
@@ -103,7 +118,7 @@ def _ask_host(session: Session, deps: Deps, source: Source) -> None:
         alert(session, deps, 'нет ведущего', source.id,
               f'источник «{source.status}», не задан ведущий или его e-mail')
     else:
-        subject, body = _host_message(session, source)
+        subject, body = _host_message(session, deps, source)
         deps.mailer.send(host.email, subject, body, [])
     source.flags = {**source.flags, HOST_ASKED: True}
 
@@ -123,6 +138,8 @@ def extract(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
     except MaskingUncertain as e:  # в LLM ничего не ушло; повтор не поможет — решает человек
         source.status = MASKING_UNCERTAIN
         log.warning('источник %s: маскирование не уверено, остатков %d', source.id, e.count)
-        alert(session, deps, MASKING_UNCERTAIN, source.id, f'остатков {e.count}')
+        alert(session, deps, MASKING_UNCERTAIN, source.id,
+              f'остатков {e.count}; после правки справочника или стоп-листа — '
+              f'{requeue_hint(source.id)}')
         return
     enqueue(session, SEND_REVIEWS, {'source_id': source.id}, now)

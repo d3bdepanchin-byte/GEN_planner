@@ -19,6 +19,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser('worker', help='конвейер: приёмник, распознавание, разбор, почта')
     rp = sub.add_parser('reprocess', help='переобработка записи без новых задач (Д-51)')
     rp.add_argument('source_id', type=int)
+    rq = sub.add_parser('requeue', help='повтор вручную по статусу источника')
+    rq.add_argument('source_id', type=int)
+    rq.add_argument('--as-planerka', action='store_true',
+                    help='запись без фразы открытия разобрать как планёрку')
     ie = sub.add_parser('import-employees', help='справочник сотрудников из xlsx')
     ie.add_argument('path', type=Path)
     ir = sub.add_parser('import-registry', help='реестр пилота из xlsx')
@@ -51,6 +55,19 @@ def _reprocess(env: Env, args) -> int:
     with session_scope(env.database_url) as session:
         out = reprocess(session, args.source_id, build_deps(session, env))
     print(out)
+    return 0
+
+
+def _requeue(env: Env, args) -> int:
+    from planerka.db import session_scope
+    from planerka.pipeline.requeue import RequeueRefused, requeue
+    try:
+        with session_scope(env.database_url) as session:
+            kind = requeue(session, args.source_id, args.as_planerka)
+    except RequeueRefused as e:
+        print(e, file=sys.stderr)
+        return 2
+    print(f'источник {args.source_id}: в очереди {kind}')
     return 0
 
 
@@ -99,7 +116,8 @@ def _restore_check(env: Env, args) -> int:
 
 
 COMMANDS = {
-    'worker': _worker, 'reprocess': _reprocess, 'import-employees': _import_employees,
+    'worker': _worker, 'reprocess': _reprocess, 'requeue': _requeue,
+    'import-employees': _import_employees,
     'import-registry': _import_registry, 'backup': _backup, 'restore-check': _restore_check,
 }
 
