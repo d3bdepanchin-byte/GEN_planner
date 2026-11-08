@@ -26,7 +26,7 @@ def candidate(**over) -> dict:
         'due_date': '2026-11-20',
         'control_date': None,
         'done_criteria': 'прайс-лист отправлен в отдел продаж',
-        'timecode': '[01:10]',
+        'timecode': '[01:00]',
         'quote': 'Ставим задачу: подготовить прайс-лист, ответственный — [P1]',
         'confidence': 'высокая',
         'confidence_reason': 'задача повторена в итогах',
@@ -79,7 +79,7 @@ def deps_no_final(make_deps):
 def deps_edit_21(make_deps):
     return make_deps(result(edits=[{'task_number': 'И-021', 'change': 'срок — 2026-11-25',
                                     'quote': 'Задача И-021 — срок двадцать пятое',
-                                    'timecode': '[04:30]'}]))
+                                    'timecode': '[01:30]'}]))
 
 
 def tasks_of(session, source):
@@ -205,8 +205,8 @@ def test_unknown_owner_token_emptied_with_question(session, make_deps, source, t
     extract_source(session, source, transcript, deps)
     t = first_task(session, source)
     assert t.owner_id is None and t.coexecutor_ids == []
-    assert 'ответственный: неизвестный токен' in t.questions
-    assert 'соисполнитель: неизвестный токен' in t.questions
+    assert 'ответственный: токена нет в записи' in t.questions
+    assert 'соисполнитель: токена нет в записи' in t.questions
 
 
 def test_external_person_as_owner_emptied_with_question(session, make_deps, tokens, source,
@@ -236,9 +236,10 @@ def test_demask_notes_go_to_candidate_questions(session, make_deps, source, tran
     deps = make_deps(result([candidate(quote='[P1|P3] берёт', done_criteria='звонок [X9]')]))
     extract_source(session, source, transcript, deps)
     t = first_task(session, source)
-    assert t.quote == '' and t.done_criteria is None
+    assert t.quote == 'Смирнов Александр или Попов Александр берёт'
+    assert t.done_criteria == 'звонок [?]'
     assert 'выбрать: Смирнов Александр или Попов Александр' in t.questions
-    assert 'неизвестный токен' in t.questions
+    assert 'токена нет в записи' in t.questions
 
 
 # --- постобработка по правилу 2 ---
@@ -326,7 +327,7 @@ def test_candidate_fields_saved(session, deps, source, transcript):
     extract_source(session, source, transcript, deps)
     t = first_task(session, source)
     assert (t.type, t.priority, t.goal_2027) == ('поручение', 'B', 'стратегия продаж')
-    assert (t.due_date, t.timecode, t.confidence) == (date(2026, 11, 20), '[01:10]', 'высокая')
+    assert (t.due_date, t.timecode, t.confidence) == (date(2026, 11, 20), '[01:00]', 'высокая')
     assert t.questions == [] and t.flags == []
 
 
@@ -376,12 +377,12 @@ def test_edit_to_unknown_number_is_report_note(session, make_deps, source, trans
 def test_edit_text_demasked_and_linked_to_source(session, make_deps, source, transcript,
                                                  task_21):
     deps = make_deps(result(edits=[{'task_number': 'и 21', 'change': 'передать [P2]',
-                                    'quote': 'И-021 — передаём [P2]', 'timecode': '[04:30]'}]))
+                                    'quote': 'И-021 — передаём [P2]', 'timecode': '[01:30]'}]))
     rep = extract_source(session, source, transcript, deps)
     edit = session.scalars(select(TaskEdit)).one()
     assert edit.change == 'передать Кузнецова Ольга'
     assert edit.quote == 'И-021 — передаём Кузнецова Ольга'
-    assert (edit.source_id, edit.timecode, rep.edits) == (source.id, '[04:30]', 1)
+    assert (edit.source_id, edit.timecode, rep.edits) == (source.id, '[01:30]', 1)
 
 
 def test_report_counts(session, deps_edit_21, source, transcript, task_21):
@@ -394,3 +395,75 @@ def test_llm_answer_not_by_schema_is_retried(session, make_deps, source, transcr
     rep = extract_source(session, source, transcript, deps)
     assert len(deps.llm.requests) == 2 and len(rep.created) == 1
 
+
+
+# --- токены и таймкоды только из записи (фикс-раунд 1, R19, R20) ---
+
+def test_owner_token_not_in_recording_rejected(session, make_deps, source, transcript_p1_only):
+    deps = make_deps(result([candidate(owner='[P2]')]))
+    extract_source(session, source, transcript_p1_only, deps)
+    t = first_task(session, source)
+    assert t.owner_id is None and 'ответственный: токена нет в записи' in t.questions
+
+
+def test_coexecutor_and_author_not_in_recording_rejected(session, make_deps, source,
+                                                        transcript_p1_only, smirnov):
+    deps = make_deps(result([candidate(coexecutors=['[P1]', '[P3]'], author='[P2]')]))
+    extract_source(session, source, transcript_p1_only, deps)
+    t = first_task(session, source)
+    assert t.coexecutor_ids == [smirnov.id] and t.author_id is None
+    assert 'соисполнитель: токена нет в записи' in t.questions
+    assert 'постановщик: токена нет в записи' in t.questions
+
+
+def test_owner_picked_from_ambiguous_mention_rejected(session, make_deps, source,
+                                                      transcript_ambiguous_only):
+    deps = make_deps(result([candidate(owner='[P1]', quote='Саша, подготовь')]))
+    extract_source(session, source, transcript_ambiguous_only, deps)
+    t = first_task(session, source)
+    assert t.owner_id is None and 'ответственный: токена нет в записи' in t.questions
+
+
+def test_free_text_token_not_in_recording_becomes_unintelligible(session, make_deps, source,
+                                                                 transcript_p1_only):
+    deps = make_deps(result([candidate(title='Позвонить [P2]')]))
+    extract_source(session, source, transcript_p1_only, deps)
+    t = first_task(session, source)
+    assert t.title == 'Позвонить [?]' and 'токена нет в записи' in t.questions
+
+
+def test_ambiguous_token_in_summary_keeps_text(session, make_deps, source, transcript):
+    deps = make_deps(result(summary='Прайс готовит [P1|P3].'))
+    rep = extract_source(session, source, transcript, deps)
+    assert source.summary == 'Прайс готовит Смирнов Александр или Попов Александр.'
+    assert rep.notes == ['саммари: неоднозначный токен']
+
+
+def test_missing_owner_and_type_asked(session, make_deps, source, transcript):
+    deps = make_deps(result([candidate(owner=None, type=None)]))
+    extract_source(session, source, transcript, deps)
+    t = first_task(session, source)
+    assert 'ответственный не назван' in t.questions and 'тип не указан' in t.questions
+
+
+def test_server_questions_not_duplicated_with_llm(session, make_deps, source, transcript):
+    deps = make_deps(result([candidate(owner=None, type=None,
+                                       questions=['ответственный не назван', 'тип не указан'])]))
+    extract_source(session, source, transcript, deps)
+    assert first_task(session, source).questions == ['ответственный не назван', 'тип не указан']
+
+
+@pytest.mark.parametrize('timecode', ['[09:59]', '1:00', '[1:00]', '01:00'])
+def test_timecode_not_in_recording_emptied(session, make_deps, source, transcript, timecode):
+    deps = make_deps(result([candidate(timecode=timecode)]))
+    extract_source(session, source, transcript, deps)
+    t = first_task(session, source)
+    assert t.timecode is None and 'таймкод не найден в записи' in t.questions
+
+
+def test_edit_timecode_not_in_recording_emptied(session, make_deps, source, transcript, task_21):
+    deps = make_deps(result(edits=[{'task_number': 'И-021', 'change': 'выполнено',
+                                    'quote': 'И-021 — выполнено', 'timecode': '[44:44]'}]))
+    rep = extract_source(session, source, transcript, deps)
+    assert session.scalars(select(TaskEdit)).one().timecode is None
+    assert 'правка к И-021: таймкод не найден в записи' in rep.notes

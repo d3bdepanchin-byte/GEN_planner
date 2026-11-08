@@ -1,4 +1,4 @@
-from planerka.masking.demask import demask
+from planerka.masking.demask import demask, demask_text
 
 
 # --- тесты из брифа ---
@@ -66,3 +66,38 @@ def test_repeated_problem_noted_once(tokens):
 def test_non_token_brackets_kept(tokens):
     data, notes = demask({'quote': 'срок [?] и [п1]'}, tokens, 1)
     assert data == {'quote': 'срок [?] и [п1]'} and notes == []
+
+
+# --- demask_text: свободный текст не очищается целиком (R19) ---
+
+def test_demask_text_ambiguous_keeps_both_names(tokens):
+    text, notes = demask_text('берёт [P1|P3]', tokens, 1)
+    assert text == 'берёт Смирнов Александр или Попов Александр'
+    assert notes == ['выбрать: Смирнов Александр или Попов Александр']
+
+
+def test_demask_text_unknown_token_becomes_unintelligible(tokens):
+    text, notes = demask_text('позвонить [X7] и [P1], [P1|P99]', tokens, 1)
+    assert text == 'позвонить [?] и Смирнов Александр, [?]'
+    assert notes == ['неизвестный токен']
+
+
+def test_demask_text_token_not_in_recording(tokens):
+    text, notes = demask_text('сделает [P2] с [P1]', tokens, 1, seen={'[P1]'})
+    assert text == 'сделает [?] с Смирнов Александр'
+    assert notes == ['токена нет в записи']
+
+
+def test_demask_text_choice_from_ambiguous_is_not_in_recording(tokens):
+    text, notes = demask_text('[P1] и [P1|P3]', tokens, 1, seen={'[P1|P3]'})
+    assert text == '[?] и Смирнов Александр или Попов Александр'
+    assert notes == ['токена нет в записи', 'выбрать: Смирнов Александр или Попов Александр']
+
+
+def test_demask_text_without_tokens_unchanged(tokens):
+    assert demask_text('[00:30] срок [?]', tokens, 1) == ('[00:30] срок [?]', [])
+
+
+def test_structured_demask_still_strict(tokens):
+    data, _ = demask({'owner': '[P1|P3]', 'quote': 'и [X7]'}, tokens, 1)
+    assert data == {'owner': '', 'quote': ''}

@@ -2,8 +2,9 @@
 
 Во внешний LLM уходит только текст, прошедший `ensure_clean` (правило 5): при остатке ПДн
 `MaskingUncertain` выходит наружу до запроса. Ответ LLM — недоверенный: люди резолвятся из токена
-прямо в сотрудника (R18), текстовые поля — через `demask`. Пробелы не додумываются (правило 2):
-поле пустое, вопрос в `questions`. Заметки отчёта и логи — без ПДн.
+прямо в сотрудника (R18), текстовые поля — через `demask_text` (R19). Токен и таймкод принимаются,
+только если они есть в замаскированной записи. Пробелы не додумываются (правило 2): поле пустое,
+вопрос в `questions`. Заметки отчёта и логи — без ПДн.
 """
 import logging
 import re
@@ -22,7 +23,7 @@ from planerka.extract.schema import CandidateOut, EditOut, ExtractionResult
 from planerka.llm.base import LLMClient
 from planerka.llm.prompts import Prompt
 from planerka.masking.checker import ensure_clean
-from planerka.masking.demask import UNKNOWN, demask
+from planerka.masking.demask import NOT_IN_RECORDING, UNKNOWN, demask_text
 from planerka.masking.masker import Masker
 from planerka.masking.names import NameFinder
 from planerka.masking.tokens import TOKEN_IN_TEXT, TokenStore
@@ -40,6 +41,9 @@ TYPE_ORDER, TYPE_PROJECT, TYPE_INVESTIGATION, TYPE_RULE = (
 _OPEN = tuple(s.value for s in (TaskStatus.CANDIDATE, TaskStatus.CONFIRMED_BY_EXECUTOR,
                                 TaskStatus.IN_PROGRESS, TaskStatus.PAUSED))
 _PART = re.compile(r'([A-Z]+)(\d+)')
+_TIMECODE = re.compile(r'\[\d{2,}:\d{2}\]')
+NO_TIMECODE = 'таймкод не найден в записи'
+NO_OWNER, NO_TYPE = 'ответственный не назван', 'тип не указан'
 # Роль поля с человеком: (именительный, родительный) — для вопросов.
 _OWNER, _COEXECUTOR, _AUTHOR = (('ответственный', 'ответственного'),
                                 ('соисполнитель', 'соисполнителя'),
@@ -63,6 +67,27 @@ class ExtractReport:
     notes: list[str] = field(default_factory=list)  # без ПДн: номера и виды проблем
 
 
+@dataclass
+class _Recording:
+    """Что есть в замаскированной записи: только этим токенам и таймкодам можно верить."""
+    source: Source
+    tokens: TokenStore
+    seen: set[str]
+    timecodes: set[str]
+
+    def text(self, value: str, notes: list[str]) -> str:
+        out, found = demask_text(value, self.tokens, self.source.id, self.seen)
+        notes += found
+        return out
+
+    def timecode(self, value: str | None) -> tuple[str | None, bool]:
+        """(таймкод или None, принят ли). Пустой — принят: таймкод не обязателен."""
+        if value is None:
+            return None, True
+        ok = _TIMECODE.fullmatch(value) is not None and value in self.timecodes
+        return (value, True) if ok else (None, False)
+
+
 def extract_source(session: Session, source: Source, transcript: Transcript,
                    deps: ExtractDeps) -> ExtractReport:
     """Кандидаты задач и правки из стенограммы. Разобранный источник повторно не разбирается."""
@@ -79,20 +104,23 @@ def extract_source(session: Session, source: Source, transcript: Transcript,
         'goals': '\n'.join(f'- {g}' for g in goals),
         'transcript': masked.text,
     }, ExtractionResult)
+    rec = _Recording(source, deps.tokens, set(TOKEN_IN_TEXT.findall(masked.text)),
+                     set(_TIMECODE.findall(masked.text)))
 
     for edit in result.edits:  # до новых задач: правка — только к уже существующему номеру
-        _save_edit(session, source, edit, deps.tokens, report)
+        _save_edit(session, rec, edit, report)
 
     post = _Postprocess(goals, meeting)
     created: list[Task] = []
     for c in result.candidates:
-        task = _candidate_task(session, source, c, result.final_block_found, deps.tokens, post)
+        task = _candidate_task(session, rec, c, result.final_block_found, post)
         session.add(task)
         created.append(task)
     session.flush()
     _check_priority_a(session, created, int(get_setting(session, 'registry.max_priority_a')))
 
-    summary, notes = demask(result.summary, deps.tokens, source.id)
+    notes: list[str] = []
+    summary = rec.text(result.summary, notes)
     report.notes += [f'саммари: {_kind(n)}' for n in notes]
     flags = dict(source.flags or {})
     flags['prompt'] = f'{deps.prompt.name}.v{deps.prompt.version}'
@@ -110,12 +138,11 @@ def extract_source(session: Session, source: Source, transcript: Transcript,
 
 
 def _kind(note: str) -> str:
-    """Заметка demask без ФИО: «выбрать: …» в отчёте — просто неоднозначный токен."""
-    return UNKNOWN if note == UNKNOWN else 'неоднозначный токен'
+    """Заметка без ФИО для отчёта: «выбрать: …» — просто неоднозначный токен."""
+    return note if note in (UNKNOWN, NOT_IN_RECORDING, NO_TIMECODE) else 'неоднозначный токен'
 
 
-def _save_edit(session: Session, source: Source, edit: EditOut, tokens: TokenStore,
-               report: ExtractReport) -> None:
+def _save_edit(session: Session, rec: _Recording, edit: EditOut, report: ExtractReport) -> None:
     try:
         number = parse_number(edit.task_number)
     except ValueError:
@@ -125,10 +152,14 @@ def _save_edit(session: Session, source: Source, edit: EditOut, tokens: TokenSto
     if session.scalar(select(Task.id).where(Task.number == number)) is None:
         report.notes.append(f'правка к несуществующей задаче {label}')
         return
-    data, notes = demask({'change': edit.change, 'quote': edit.quote}, tokens, source.id)
-    report.notes += [f'правка к {label}: {_kind(n)}' for n in notes]
-    session.add(TaskEdit(task_number=number, change=data['change'], quote=data['quote'] or None,
-                         timecode=edit.timecode, source_id=source.id,
+    notes: list[str] = []
+    change, quote = rec.text(edit.change, notes), rec.text(edit.quote, notes)
+    timecode, ok = rec.timecode(edit.timecode)
+    if not ok:
+        notes.append(NO_TIMECODE)
+    report.notes += [f'правка к {label}: {_kind(n)}' for n in dict.fromkeys(notes)]
+    session.add(TaskEdit(task_number=number, change=change, quote=quote or None,
+                         timecode=timecode, source_id=rec.source.id,
                          status=TaskStatus.CANDIDATE.value))
     report.edits += 1
 
@@ -170,21 +201,29 @@ class _Postprocess:
         return q
 
 
-def _candidate_task(session: Session, source: Source, c: CandidateOut, final_block_found: bool,
-                    tokens: TokenStore, post: _Postprocess) -> Task:
+def _candidate_task(session: Session, rec: _Recording, c: CandidateOut, final_block_found: bool,
+                    post: _Postprocess) -> Task:
     questions: list[str] = []
-    owner_id = _person(session, tokens, source.id, c.owner, _OWNER, questions)
-    author_id = _person(session, tokens, source.id, c.author, _AUTHOR, questions)
+    owner_id = _person(session, rec, c.owner, _OWNER, questions)
+    author_id = _person(session, rec, c.author, _AUTHOR, questions)
     coexecutor_ids: list[int] = []
     for value in c.coexecutors:
-        emp = _person(session, tokens, source.id, value, _COEXECUTOR, questions)
+        emp = _person(session, rec, value, _COEXECUTOR, questions)
         if emp is not None and emp not in coexecutor_ids:
             coexecutor_ids.append(emp)
+    if c.owner is None or not c.owner.strip():
+        questions.append(NO_OWNER)
+    if c.type is None:
+        questions.append(NO_TYPE)
 
-    text, notes = demask({'title': c.title, 'quote': c.quote, 'done_criteria': c.done_criteria,
-                          'confidence_reason': c.confidence_reason, 'questions': c.questions},
-                         tokens, source.id)
-    asked = [q for q in text['questions'] if q.strip()]
+    notes: list[str] = []
+    title, quote = rec.text(c.title, notes), rec.text(c.quote, notes)
+    done = rec.text(c.done_criteria, notes) if c.done_criteria is not None else None
+    reason = rec.text(c.confidence_reason, notes)
+    asked = [q for q in (rec.text(q, notes) for q in c.questions) if q.strip()]
+    timecode, ok = rec.timecode(c.timecode)
+    if not ok:
+        questions.append(NO_TIMECODE)
     flags: list[str] = []
     if not final_block_found:
         flags.append(NO_FINAL_BLOCK)
@@ -192,30 +231,31 @@ def _candidate_task(session: Session, source: Source, c: CandidateOut, final_blo
         flags.append(FROM_DISCUSSION)
 
     task = Task(
-        number=next_task_number(session), title=text['title'], type=c.type,
+        number=next_task_number(session), title=title, type=c.type,
         priority=c.priority, goal_2027=c.goal_2027, author_id=author_id, owner_id=owner_id,
         coexecutor_ids=coexecutor_ids, due_date=c.due_date, control_date=c.control_date,
-        done_criteria=text['done_criteria'] or None, source_id=source.id, timecode=c.timecode,
-        quote=text['quote'], confidence=c.confidence,
-        confidence_reason=text['confidence_reason'], flags=flags,
-        source_closed=source.closed,
+        done_criteria=done or None, source_id=rec.source.id, timecode=timecode,
+        quote=quote, confidence=c.confidence, confidence_reason=reason, flags=flags,
+        source_closed=rec.source.closed,
         registry_suggested=CLOSED_REGISTRY if c.closed_registry_suggested else None,
         status=TaskStatus.CANDIDATE.value,
     )
-    questions = asked + questions + notes + post.apply(task)
-    task.questions = list(dict.fromkeys(questions))
+    task.questions = list(dict.fromkeys(asked + questions + notes + post.apply(task)))
     return task
 
 
-def _person(session: Session, tokens: TokenStore, source_id: int, value: str | None,
-            role: tuple[str, str], questions: list[str]) -> int | None:
-    """Сотрудник по токену [Pn]; иначе None и вопрос. ФИО — только в вопросе выбора."""
+def _person(session: Session, rec: _Recording, value: str | None, role: tuple[str, str],
+            questions: list[str]) -> int | None:
+    """Сотрудник по токену [Pn] из записи; иначе None и вопрос. ФИО — только в вопросе выбора."""
     if value is None or not value.strip():
         return None
     unknown = f'{role[0]}: {UNKNOWN}'
     value = value.strip()
     if TOKEN_IN_TEXT.fullmatch(value) is None:
         questions.append(unknown)
+        return None
+    if value not in rec.seen:  # LLM выдумал человека или выбрал одного из [Pa|Pb]
+        questions.append(f'{role[0]}: {NOT_IN_RECORDING}')
         return None
     parts = [_PART.fullmatch(p) for p in value[1:-1].split('|')]
     kinds = {p.group(1) for p in parts}
@@ -226,11 +266,11 @@ def _person(session: Session, tokens: TokenStore, source_id: int, value: str | N
             questions.append(unknown)
         return emp
     if len(parts) == 1 and kinds == {'X'}:
-        surface = tokens.resolve(source_id, value)
+        surface = rec.tokens.resolve(rec.source.id, value)
         questions.append(f'{role[0]} не из справочника: {surface}' if surface else unknown)
         return None
     if len(parts) > 1 and kinds == {'P'}:
-        names = [tokens.resolve(source_id, f'[{p.group()}]') for p in parts]
+        names = [rec.tokens.resolve(rec.source.id, f'[{p.group()}]') for p in parts]
         questions.append(unknown if None in names
                          else f'выбрать {role[1]}: ' + ' или '.join(names))
         return None
