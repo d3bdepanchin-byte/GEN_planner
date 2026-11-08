@@ -41,6 +41,7 @@ escalate_after_workdays = 1  # старт
 owner_employee_id = 0  # задать при запуске
 closed_access_employee_ids = []  # задать при запуске (Д-71)
 task_number_start = 1  # перекрывается импортом (задача 7)
+max_priority_a = 5  # Схема: не больше 5 задач A на человека; превышение — только вопрос (Д-79)
 
 [meeting]
 host_employee_id = 0  # задать при запуске
