@@ -538,3 +538,28 @@ def test_unparsable_mail_set_aside_alerted_once(session, deps, settings, clock):
     assert len(alerts) == 1
     assert 'UID 9, отпечаток 0123456789ab' in alerts[0]['body']
     assert '«Обработано»' in alerts[0]['body']
+
+
+def test_replacing_extracted_recording_alerts_not_transcribed(session, deps, settings, env, audio,
+                                                              clock):
+    set_setting(session, 'intake.stability_window_sec', 0, 'test')
+    env.inbox_dir.mkdir(parents=True)
+    f = env.inbox_dir / 'запись.mp3'
+    f.write_bytes(audio.read_bytes())
+    for i in range(2):
+        enqueue(session, 'scan_inbox', {})
+        run_once(session, deps, clock.now + timedelta(seconds=i))
+    first = session.scalars(select(Source)).one()
+    first.status = 'разобран'
+    session.execute(Job.__table__.delete())
+    with f.open('ab') as h:
+        h.write(b'\0' * 16)
+    for i in range(2):
+        enqueue(session, 'scan_inbox', {})
+        run_once(session, deps, clock.now + timedelta(minutes=1, seconds=i))
+    second = session.scalars(select(Source).where(Source.id != first.id)).one()
+    assert second.status == 'ждёт решения: заменяет разобранную запись'
+    assert session.scalars(select(Job).where(Job.kind == 'transcribe')).all() == []
+    alerts = [m for m in deps.mailer.sent if m['subject'] == 'Планёрка: алерт scan_inbox']
+    assert len(alerts) == 1 and f'planerka requeue {second.id}' in alerts[0]['body']
+    assert str(first.id) in alerts[0]['body'] and 'запись.mp3' not in alerts[0]['body']

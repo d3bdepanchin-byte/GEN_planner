@@ -1,6 +1,8 @@
 """Приём записей из каталога Syncthing (Д-51, Д-69).
 
 Файл готов, когда размер и mtime не менялись intake.stability_window_sec.
+Новая версия файла заменяет прежний источник; если прежний уже разобран, новая ждёт решения
+разработчика (кандидаты прежней версии не трогаются, повтор — planerka requeue).
 Наблюдения живут в памяти: после перезапуска окно отсчитывается заново,
 а дубликаты отсекаются по sha256 в БД. В логах — только номера источников.
 """
@@ -12,17 +14,21 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from planerka.db.models import Source
+from planerka.extract.run import EXTRACTED
 from planerka.settings import get_setting
 
 log = logging.getLogger(__name__)
 
 _CHUNK = 1024 * 1024
 INBOX_NAME_FILE = "inbox_name.txt"
+RECEIVED, REPLACED = "получен", "заменён"
+REPLACES_EXTRACTED = "ждёт решения: заменяет разобранную запись"
 
 
 def sha256_file(path: Path) -> str:
@@ -95,9 +101,10 @@ class IntakeScanner:
     ) -> tuple[Source | None, bool]:
         """(новый источник или None, обработан ли файл). Сбой копирования — не обработан, повтор."""
         key = hashlib.sha256(path.relative_to(self.inbox).as_posix().encode()).hexdigest()
+        tz = ZoneInfo(get_setting(session, "company.timezone"))  # дата встречи — местная
         source = Source(
             kind="запись", path="", sha256=f"pending-{uuid.uuid4().hex}", received_at=now,
-            status="получен", meeting_date=datetime.fromtimestamp(mtime).date(),
+            status=RECEIVED, meeting_date=datetime.fromtimestamp(mtime, tz).date(),
             flags={"meeting_date_from": "mtime", "inbox_key": key})
         target_dir: Path | None = None
         try:
@@ -130,10 +137,16 @@ class IntakeScanner:
         session.flush()
         older = session.scalars(select(Source).where(
             Source.flags["inbox_key"].as_string() == key,
-            Source.id != source.id, Source.status != "заменён")).all()
+            Source.id != source.id, Source.status != REPLACED)).all()
+        extracted = [old.id for old in older if old.status == EXTRACTED]
         for old in older:
-            old.status = "заменён"
-            log.info("Источник %s заменён источником %s", old.id, source.id)
+            if old.status != EXTRACTED:
+                old.status = REPLACED
+                log.info("Источник %s заменён источником %s", old.id, source.id)
+        if extracted:
+            source.status = REPLACES_EXTRACTED
+            source.flags = {**source.flags, "replaces_extracted": extracted}
+            log.info("Источник %s заменяет разобранные %s: ждёт решения", source.id, extracted)
         session.flush()
         log.info("Принят источник %s", source.id)
         return source, True

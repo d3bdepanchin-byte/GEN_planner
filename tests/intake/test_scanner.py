@@ -1,7 +1,9 @@
 import hashlib
+import os
 import shutil
 from pathlib import Path
-from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
@@ -89,7 +91,8 @@ def test_new_source_fields(session, scanner, inbox):
     assert src.kind == "запись"
     assert src.status == "получен"
     assert src.received_at == T0 + timedelta(seconds=301)
-    assert src.meeting_date == datetime.fromtimestamp(f.stat().st_mtime).date()
+    assert src.meeting_date == datetime.fromtimestamp(
+        f.stat().st_mtime, ZoneInfo("Asia/Barnaul")).date()
     assert src.flags["meeting_date_from"] == "mtime"
     assert src.sha256 == hashlib.sha256(b"x").hexdigest()
     assert src.path.endswith("original.MP3")
@@ -200,3 +203,44 @@ def test_duplicate_copy_rolled_back(session, scanner, inbox, data_dir):
     (inbox / "b.mp3").write_bytes(b"same")
     ready(scanner, session)
     assert len(list((data_dir / "meetings").iterdir())) == 1
+
+
+WAITING = "ждёт решения: заменяет разобранную запись"
+
+
+def _replace(scanner, session, f, t, data=b"more"):
+    with f.open("ab") as h:
+        h.write(data)
+    scanner.scan(session, t)
+    return scanner.scan(session, t + timedelta(seconds=301))[0]
+
+
+def test_replacing_extracted_source_waits_for_decision(session, scanner, inbox):
+    f = inbox / "p.mp3"
+    f.write_bytes(b"part1")
+    first = ready(scanner, session)[0]
+    first.status = "разобран"
+    second = _replace(scanner, session, f, T0 + timedelta(seconds=400))
+    assert second.status == WAITING
+    assert session.get(Source, first.id).status == "разобран"  # кандидаты старой не трогаем
+
+
+def test_newer_version_replaces_waiting_one(session, scanner, inbox):
+    f = inbox / "p.mp3"
+    f.write_bytes(b"part1")
+    first = ready(scanner, session)[0]
+    first.status = "разобран"
+    second = _replace(scanner, session, f, T0 + timedelta(seconds=400))
+    third = _replace(scanner, session, f, T0 + timedelta(seconds=800), b"again")
+    assert (session.get(Source, first.id).status, second.status, third.status) == (
+        "разобран", "заменён", WAITING)
+
+
+def test_meeting_date_from_mtime_in_company_timezone(session, scanner, inbox):
+    f = inbox / "p.mp3"
+    f.write_bytes(b"x")
+    # 05.11 20:30 UTC — в Барнауле (UTC+7) уже 06.11
+    stamp = datetime(2026, 11, 5, 20, 30, tzinfo=timezone.utc).timestamp()
+    os.utime(f, (stamp, stamp))
+    src = ready(scanner, session)[0]
+    assert src.meeting_date == date(2026, 11, 6)

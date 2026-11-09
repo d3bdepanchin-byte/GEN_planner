@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from planerka.db.models import Source
 from planerka.extract.run import EXTRACTED
+from planerka.intake.scanner import REPLACES_EXTRACTED
 from planerka.pipeline.handlers.common import (
     KIND_PLANERKA, MASKING_UNCERTAIN, NOT_A_MEETING, RECEIVED, TRANSCRIBED,
 )
@@ -32,6 +33,9 @@ def requeue(session: Session, source_id: int, as_planerka: bool = False) -> str:
         source.status = TRANSCRIBED
         kind = EXTRACT
     elif status == RECEIVED:
+        kind = TRANSCRIBE
+    elif status == REPLACES_EXTRACTED:  # разработчик решил: разобрать и новую версию
+        source.status = RECEIVED
         kind = TRANSCRIBE
     elif status == TRANSCRIBED:
         kind = EXTRACT

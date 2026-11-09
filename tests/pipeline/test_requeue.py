@@ -68,3 +68,11 @@ def test_requeue_refuses_other_statuses(session, source_ready, status):
 def test_requeue_unknown_source(session):
     with pytest.raises(RequeueRefused):
         requeue(session, 10**9)
+
+
+def test_requeue_source_waiting_after_replacing_extracted(session, source_ready):
+    session.execute(Job.__table__.delete())
+    source_ready.status = 'ждёт решения: заменяет разобранную запись'
+    assert requeue(session, source_ready.id) == 'transcribe'
+    assert _queued(session, source_ready) == [('transcribe', {'source_id': source_ready.id})]
+    assert session.get(Source, source_ready.id).status == 'получен'

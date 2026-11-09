@@ -14,7 +14,7 @@ from planerka.asr.filter import MeetingKind, detect_meeting_kind
 from planerka.db.models import Employee, Source
 from planerka.extract.run import ExtractDeps, extract_source
 from planerka.intake.audio import extract_audio
-from planerka.intake.scanner import INBOX_NAME_FILE
+from planerka.intake.scanner import INBOX_NAME_FILE, REPLACES_EXTRACTED
 from planerka.masking.checker import MaskingUncertain
 from planerka.pipeline.deps import Deps
 from planerka.pipeline.handlers.common import (
@@ -33,6 +33,13 @@ HOST_ASKED = 'ведущему написано'  # флаг источника:
 def scan_inbox(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
     sources = deps.intake().scan(session, now)
     for source in sources:
+        if source.status == REPLACES_EXTRACTED:
+            old = ', '.join(str(i) for i in source.flags.get('replaces_extracted', []))
+            alert(session, deps, 'scan_inbox', source.id,
+                  f'новая версия файла записи, прежняя уже разобрана (источник {old}); '
+                  f'кандидаты прежней не тронуты, новая не обрабатывается. Если нужен разбор '
+                  f'новой версии — {requeue_hint(source.id)}')
+            continue
         enqueue(session, TRANSCRIBE, {'source_id': source.id}, now)
     if sources:
         log.info('приёмник: новых источников %d', len(sources))
