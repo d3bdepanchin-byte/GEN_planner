@@ -121,6 +121,8 @@ def test_empty_passphrase_refused(env, db_with_three_tasks):
 
 
 def test_passphrase_not_in_command_line_or_env(env, db_with_three_tasks, monkeypatch):
+    monkeypatch.setenv('BACKUP_PASSPHRASE', PASSPHRASE)
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-secret-key-1')
     seen = []
     real = subprocess.Popen
 
@@ -133,7 +135,54 @@ def test_passphrase_not_in_command_line_or_env(env, db_with_three_tasks, monkeyp
     assert seen
     for args, child_env in seen:
         assert PASSPHRASE not in ' '.join(args)
+        assert child_env, 'дочерний процесс без явного окружения наследует секреты'
+        assert 'BACKUP_PASSPHRASE' not in child_env and 'ANTHROPIC_API_KEY' not in child_env
         assert PASSPHRASE not in child_env.values()
+        assert 'sk-secret-key-1' not in child_env.values()
+
+
+def test_restore_child_env_scrubbed(env, db_with_three_tasks, scratch_url, monkeypatch):
+    full = _full(env)
+    monkeypatch.setenv('BACKUP_PASSPHRASE', PASSPHRASE)
+    monkeypatch.setenv('HF_TOKEN', 'hf-secret-2')
+    seen = []
+    real = subprocess.Popen
+
+    class Spy(real):
+        def __init__(self, args, *a, **kw):
+            seen.append(dict(kw.get('env') or {}))
+            super().__init__(args, *a, **kw)
+    monkeypatch.setattr(backup.subprocess, 'Popen', Spy)
+    check_restore(full, env, scratch_url)
+    assert seen and all(e and 'BACKUP_PASSPHRASE' not in e and 'HF_TOKEN' not in e for e in seen)
+
+
+@pytest.mark.parametrize('url', [
+    'postgresql+psycopg://u:p@127.0.0.1:5432/planerka',      # алиас хоста
+    'postgresql+psycopg://u:p@localhost/planerka',           # порт не указан
+    'postgresql+psycopg://other:p@db:5432/planerka',         # другой пользователь
+    'postgresql+psycopg://u:p@elsewhere:6543/planerka',      # другой хост и порт
+    'postgresql+psycopg://u:p@db:5432/planerka?host=/var/run',  # параметр, который не передаётся
+    'postgresql+psycopg://u:p@db:5432/planerka_scratch?host=/var/run',
+    'postgresql+psycopg://u:p@db:5432/planerka_test',        # не временная БД
+    'postgresql+psycopg://u:p@db:5432/',                     # без имени БД
+])
+def test_restore_check_guard_variants(url, tmp_path):
+    main = Env(database_url='postgresql+psycopg://u:p@db:5432/planerka',
+               backup_passphrase=PASSPHRASE)
+    f = tmp_path / 'planerka_20261109-030000.dump.gpg'
+    f.write_bytes(b'x')
+    with pytest.raises(BackupError, match='только во временную БД'):
+        check_restore(f, main, url)
+
+
+def test_restore_check_guard_allows_scratch_name(tmp_path):
+    main = Env(database_url='postgresql+psycopg://u:p@db:5432/planerka',
+               backup_passphrase=PASSPHRASE)
+    f = tmp_path / 'planerka_20261109-030000.dump.gpg'
+    f.write_bytes(b'x')  # охрана пропускает, расшифровка падает: это уже не охрана
+    with pytest.raises(BackupError, match='gpg'):
+        check_restore(f, main, 'postgresql+psycopg://u:p@db:5432/planerka_scratch')
 
 
 def test_old_backups_removed_only_matching_names(env, db_with_three_tasks):

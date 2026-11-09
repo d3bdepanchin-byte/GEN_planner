@@ -39,3 +39,52 @@ def test_backup_and_restore_check_call_module(monkeypatch, capsys, tmp_path):
     assert 'planerka_x.dump.gpg' in capsys.readouterr().out
     assert main(['restore-check', 'b.dump.gpg']) == 0
     assert 'task: 3' in capsys.readouterr().out
+
+
+@pytest.fixture
+def cli_db(test_engine, monkeypatch):
+    import os
+    from sqlalchemy import text
+    monkeypatch.setenv('DATABASE_URL', os.environ['DATABASE_URL_TEST'])
+    yield
+    with test_engine.begin() as c:
+        c.execute(text("DELETE FROM setting WHERE key IN ('meeting.host_employee_id', "
+                       "'registry.closed_access_employee_ids', 'alerts.developer_email', "
+                       "'alerts.sysadmin_email')"))
+
+
+def test_setting_prints_default_and_sets_values(cli_db, capsys):
+    assert main(['setting', 'backup.keep_days']) == 0
+    assert capsys.readouterr().out.strip() == '30'
+    assert main(['setting', 'meeting.host_employee_id', '12']) == 0
+    capsys.readouterr()
+    main(['setting', 'meeting.host_employee_id'])
+    assert capsys.readouterr().out.strip() == '12'
+    assert main(['setting', 'registry.closed_access_employee_ids', '[3, 4]']) == 0
+    capsys.readouterr()
+    main(['setting', 'registry.closed_access_employee_ids'])
+    assert capsys.readouterr().out.strip() == '[3, 4]'
+    assert main(['setting', 'alerts.developer_email', 'dev@example.test']) == 0  # голая строка
+
+
+def test_setting_unknown_key_exits_2(cli_db, capsys):
+    assert main(['setting', 'no.such.key']) == 2
+    assert main(['setting', 'no.such.key', '1']) == 2
+
+
+def test_test_alert_sends_to_both(cli_db, monkeypatch, capsys):
+    from planerka.mail.fake import FakeMailer
+    import planerka.mail.smtp as smtp
+    mailer = FakeMailer()
+    monkeypatch.setattr(smtp, 'SmtpMailer', lambda env: mailer)
+    main(['setting', 'alerts.developer_email', 'dev@example.test'])
+    main(['setting', 'alerts.sysadmin_email', 'adm@example.test'])
+    assert main(['test-alert']) == 0
+    assert sorted(m['to'] for m in mailer.sent) == ['adm@example.test', 'dev@example.test']
+
+
+def test_test_alert_without_addresses_exits_2(cli_db, monkeypatch, capsys):
+    from planerka.mail.fake import FakeMailer
+    import planerka.mail.smtp as smtp
+    monkeypatch.setattr(smtp, 'SmtpMailer', lambda env: FakeMailer())
+    assert main(['test-alert']) == 2

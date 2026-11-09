@@ -30,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
     rc = sub.add_parser('restore-check', help='проверка восстановления из бэкапа')
     rc.add_argument('path', type=Path)
     rc.add_argument('--scratch-url', default='', help='временная БД (по умолчанию planerka_scratch)')
+    st = sub.add_parser('setting', help='настройка: без значения печатает текущее')
+    st.add_argument('key')
+    st.add_argument('value', nargs='?', help='число, строка, true/false или список [1, 2]')
+    sub.add_parser('test-alert', help='тестовый алерт разработчику и сисадмину')
     return p
 
 
@@ -110,7 +114,53 @@ def _restore_check(env: Env, args) -> int:
     return 0
 
 
+def _parse_value(raw: str):
+    """Значение как скаляр или список TOML; не разобралось — обычная строка."""
+    import tomllib
+    try:
+        return tomllib.loads(f'v = {raw}')['v']
+    except tomllib.TOMLDecodeError:
+        return raw
+
+
+def _setting(env: Env, args) -> int:
+    import json
+    from planerka.db import session_scope
+    from planerka.settings import UnknownSetting, get_setting, set_setting
+    try:
+        with session_scope(env.database_url) as session:
+            if args.value is None:
+                print(json.dumps(get_setting(session, args.key), ensure_ascii=False))
+            else:
+                set_setting(session, args.key, _parse_value(args.value), 'cli')
+                print(f'{args.key}: задано')
+    except UnknownSetting:
+        print(f'неизвестная настройка: {args.key}', file=sys.stderr)
+        return 2
+    return 0
+
+
+def _test_alert(env: Env, args) -> int:
+    from planerka.core.directory import load_directory
+    from planerka.db import session_scope
+    from planerka.mail.smtp import SmtpMailer
+    from planerka.notify import send_alert_safe
+    from planerka.settings import get_setting
+    with session_scope(env.database_url) as session:
+        to = [a for a in (get_setting(session, 'alerts.developer_email'),
+                          get_setting(session, 'alerts.sysadmin_email')) if a]
+        if not to:
+            print('alerts.developer_email и alerts.sysadmin_email не заданы', file=sys.stderr)
+            return 2
+        ok = send_alert_safe(SmtpMailer(env), to, 'test', None,
+                             'проверка канала алертов', load_directory(session))
+    print(f'отправлено адресатам: {len(to)}' if ok else 'алерт не отправлен, см. журнал',
+          file=None if ok else sys.stderr)
+    return 0 if ok else 2
+
+
 COMMANDS = {
+    'setting': _setting, 'test-alert': _test_alert,
     'worker': _worker, 'reprocess': _reprocess, 'requeue': _requeue,
     'import-employees': _import_employees,
     'import-registry': _import_registry, 'backup': _backup, 'restore-check': _restore_check,

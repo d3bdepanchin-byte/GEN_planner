@@ -43,6 +43,16 @@ def same_device(a: Path, b: Path) -> bool:
     return os.stat(_existing_ancestor(a)).st_dev == os.stat(_existing_ancestor(b)).st_dev
 
 
+_ENV_KEEP = {'PATH', 'HOME', 'LANG', 'LANGUAGE', 'TZ', 'TMPDIR', 'GNUPGHOME', 'USER', 'LOGNAME'}
+
+
+def _child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Окружение дочерних процессов: только нужное для запуска, без секретов из .env."""
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP or k.startswith('LC_')}
+    env.update(extra or {})
+    return env
+
+
 def _pg_args(url: URL) -> tuple[list[str], dict[str, str]]:
     """Параметры подключения для pg_*: пароль — только в окружении дочернего процесса."""
     args = []
@@ -53,10 +63,7 @@ def _pg_args(url: URL) -> tuple[list[str], dict[str, str]]:
     if url.username:
         args += ['-U', url.username]
     args += ['-d', url.database or '']
-    env = dict(os.environ)
-    if url.password:
-        env['PGPASSWORD'] = url.password
-    return args, env
+    return args, _child_env({'PGPASSWORD': url.password} if url.password else None)
 
 
 def _passphrase_pipe(passphrase: str) -> int:
@@ -77,7 +84,7 @@ def _run_pipeline(first: list[str], first_env: dict[str, str], second: list[str]
         producer = subprocess.Popen(first, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                     env=first_env)
         consumer = subprocess.Popen(cmd2, stdin=producer.stdout, stderr=subprocess.DEVNULL,
-                                    pass_fds=(fd,))
+                                    env=_child_env(), pass_fds=(fd,))
         producer.stdout.close()
         rc2 = consumer.wait()
         rc1 = producer.wait()
@@ -172,8 +179,9 @@ def check_restore(path: Path, env: Env, scratch_url: str) -> dict[str, int]:
         raise BackupError('BACKUP_PASSPHRASE не задан: расшифровать нечем')
     target = make_url(scratch_url or default_scratch_url(env))
     main = make_url(env.database_url)
-    if (target.database == main.database and target.host == main.host
-            and target.port == main.port) or not target.database:
+    scratch_name = target.database or ''
+    if (not scratch_name.endswith('_scratch') or scratch_name == main.database
+            or target.query):  # параметры URL (host=…) в pg_restore не передаются
         raise BackupError('проверка восстановления идёт только во временную БД, '
                           'а не в основную')
     args, child_env = _pg_args(target)
@@ -186,7 +194,7 @@ def check_restore(path: Path, env: Env, scratch_url: str) -> dict[str, int]:
     try:
         gpg = subprocess.Popen([a.replace('{fd}', str(fd)) for a in decrypt],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               pass_fds=(fd,))
+                               env=_child_env(), pass_fds=(fd,))
         pg = subprocess.Popen([*restore, *args], stdin=gpg.stdout, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, env=child_env)
         gpg.stdout.close()
