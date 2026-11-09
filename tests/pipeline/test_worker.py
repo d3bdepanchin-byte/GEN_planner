@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 
 from planerka.db.models import Job, ReviewFile, Source
 from planerka.llm.base import JsonLLMBase, LLMUnavailable
-from planerka.mail.base import IncomingMail
+from planerka.mail.base import IncomingMail, MailError
 from planerka.mail.fake import FakeInbox
 from planerka.pipeline import worker
 from planerka.pipeline.handlers import review as review_handlers
@@ -488,3 +488,53 @@ def test_job_logs_have_no_text(session, deps_leaky_text, source_ready, run_until
     caplog.set_level('DEBUG')
     run_until_idle(session, deps_leaky_text)
     assert 'Смирнов' not in caplog.text and 'прайс' not in caplog.text
+
+
+class StuckInbox(FakeInbox):
+    """mark_done падает, пока не починят папку на сервере."""
+    def __init__(self, messages, broken=True):
+        super().__init__(messages)
+        self.broken, self.calls = broken, 0
+
+    def mark_done(self, message_id):
+        self.calls += 1
+        if self.broken:
+            raise MailError('IMAP: MOVE не выполнено')
+        super().mark_done(message_id)
+
+
+def test_reply_not_repeated_when_mark_done_fails(session, deps, settings, clock):
+    deps.inbox = StuckInbox([IncomingMail('<m1@example.test>', 'a@example.test', 'Re: файл')])
+    for i in range(3):
+        enqueue(session, 'poll_mail', {})
+        run_once(session, deps, clock.now + timedelta(hours=i))
+    replies = [m for m in deps.mailer.sent if m['in_reply_to'] == '<m1@example.test>']
+    assert len(replies) == 1  # подсказка ушла один раз, дальше — только перенос письма
+    assert deps.inbox.calls >= 2 and deps.inbox.done == []
+    deps.inbox.broken = False
+    enqueue(session, 'poll_mail', {})
+    run_once(session, deps, clock.now + timedelta(hours=5))
+    assert deps.inbox.done == ['<m1@example.test>']
+    assert '<m1@example.test>' not in deps.mail_answered
+    assert len([m for m in deps.mailer.sent if m['in_reply_to'] == '<m1@example.test>']) == 1
+
+
+class SetAsideInbox(FakeInbox):
+    def __init__(self):
+        super().__init__([])
+        self.pending = ['UID 9, отпечаток 0123456789ab']
+
+    def take_set_aside(self):
+        out, self.pending = self.pending, []
+        return out
+
+
+def test_unparsable_mail_set_aside_alerted_once(session, deps, settings, clock):
+    deps.inbox = SetAsideInbox()
+    for i in range(2):
+        enqueue(session, 'poll_mail', {})
+        run_once(session, deps, clock.now + timedelta(minutes=i))
+    alerts = [m for m in deps.mailer.sent if m['to'] == DEV]
+    assert len(alerts) == 1
+    assert 'UID 9, отпечаток 0123456789ab' in alerts[0]['body']
+    assert '«Обработано»' in alerts[0]['body']

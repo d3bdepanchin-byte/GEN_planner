@@ -29,3 +29,6 @@ class FakeInbox:
 
     def mark_done(self, message_id: str) -> None:
         self.done.append(message_id)
+
+    def take_set_aside(self) -> list[str]:
+        return []

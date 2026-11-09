@@ -32,5 +32,9 @@ class ServiceInbox(Protocol):
     def mark_done(self, message_id: str) -> None:
         """Письмо обработано: убрать из входящих (Д-75)."""
         ...
+
+    def take_set_aside(self) -> list[str]:
+        """Письма, которые не разбираются и убраны без ответа: метки без ПДн, для алерта."""
+        ...
 class MailError(RuntimeError):
     """Команда почтового сервера не выполнена; письмо осталось на месте."""

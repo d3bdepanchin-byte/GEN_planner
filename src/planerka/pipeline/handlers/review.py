@@ -81,13 +81,24 @@ def send_reviews(session: Session, deps: Deps, payload: dict, now: datetime) -> 
 def poll_mail(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
     """Ответы на файлы. Письмо помечается обработанным только после фиксации в БД.
 
+    Письмо с ответом, которое не удалось убрать (mark_done упал), повторно не разбирается и
+    второй ответ не получает: при следующем опросе — только перенос (deps.mail_answered).
     Ошибка самого письма (адрес отклонён, вложение не читается) — письмо остаётся во входящих;
     после jobs.max_attempts таких неудач подряд оно убирается без ответа, один алерт.
     Сбой почтового сервера или БД — не вина письма: проход прерывается без счёта, задание
     идёт обычным путём повторов и алертов.
     """
     limit = int(get_setting(session, 'jobs.max_attempts'))
-    for mail in deps.inbox.fetch_new():
+    mails = deps.inbox.fetch_new()
+    for label in deps.inbox.take_set_aside():
+        alert(session, deps, 'poll_mail', None,
+              f'письмо не разбирается ({label}), перенесено без ответа в папку '
+              f'«{deps.inbox.done_folder}» служебного ящика')
+    for mail in mails:
+        if mail.message_id in deps.mail_answered:  # ответ уже ушёл: только убрать письмо
+            deps.inbox.mark_done(mail.message_id)
+            deps.mail_answered.discard(mail.message_id)
+            continue
         try:
             outcome = accept_review_mail(session, mail, deps.mailer,
                                          own_address=deps.env.service_mailbox)
@@ -99,7 +110,9 @@ def poll_mail(session: Session, deps: Deps, payload: dict, now: datetime) -> Non
             _mail_failed(session, deps, mail.message_id, type(e).__name__, limit)
             continue
         deps.mail_failures.pop(mail.message_id, None)
+        deps.mail_answered.add(mail.message_id)
         deps.inbox.mark_done(mail.message_id)
+        deps.mail_answered.discard(mail.message_id)
         log.info('письмо обработано: %s', outcome.value)
 
 

@@ -253,3 +253,79 @@ def test_fetch_failure_does_not_block_others(monkeypatch, tmp_path, caplog):
     got = ImapServiceInbox(env(tmp_path)).fetch_new()
     assert [m.message_id for m in got] == ['<g1@example.test>', '<g2@example.test>']
     assert 'UID 2' in caplog.text
+
+
+DONE_UTF7 = '&BB4EMQRABDAEMQQ+BEIEMAQ9BD4-'
+
+
+class NamespaceImap(FakeImap):
+    """Сервер с личным пространством «INBOX.» и разделителем «.» (Courier, часть Dovecot)."""
+    def __init__(self, folders=(), namespace=True):
+        super().__init__(move=True)
+        self.folders, self.namespace_cap = list(folders), namespace
+
+    def capability(self):
+        caps = 'IMAP4rev1 MOVE' + (' NAMESPACE' if self.namespace_cap else '')
+        return 'OK', [caps.encode()]
+
+    def namespace(self):
+        return 'OK', [b'(("INBOX." ".")) NIL NIL']
+
+    def list(self):
+        return 'OK', [b'(\\HasChildren) "." "INBOX"'] + [
+            f'(\\HasNoChildren) "." "{f}"'.encode() for f in self.folders]
+
+
+def _moved_to(fake):
+    return [c[2] for c in fake.log if c[0] == 'MOVE']
+
+
+def test_done_folder_created_under_namespace_prefix(monkeypatch, tmp_path):
+    fake = NamespaceImap(['INBOX.Sent'])
+    fake.login = lambda u, p: ('OK', [])
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    ImapServiceInbox(env(tmp_path)).mark_done('<m1@example.test>')
+    assert ('create', f'INBOX.{DONE_UTF7}') in fake.log
+    assert _moved_to(fake) == [f'"INBOX.{DONE_UTF7}"']
+
+
+def test_existing_prefixed_done_folder_reused(monkeypatch, tmp_path):
+    fake = NamespaceImap([f'INBOX.{DONE_UTF7}'], namespace=False)
+    fake.login = lambda u, p: ('OK', [])
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    ImapServiceInbox(env(tmp_path)).mark_done('<m1@example.test>')
+    assert 'create' not in [c[0] for c in fake.log]
+    assert _moved_to(fake) == [f'"INBOX.{DONE_UTF7}"']
+
+
+def test_done_folder_matched_exactly_not_by_suffix(monkeypatch, tmp_path):
+    fake = FakeImap(move=True)
+    fake.folders = [f'Архив/{DONE_UTF7}']  # чужая вложенная папка с тем же концом имени
+    fake.login = lambda u, p: ('OK', [])
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    ImapServiceInbox(env(tmp_path)).mark_done('<m1@example.test>')
+    assert ('create', DONE_UTF7) in fake.log
+    assert _moved_to(fake) == [f'"{DONE_UTF7}"']
+
+
+def test_unparsable_message_set_aside_after_limit(monkeypatch, tmp_path):
+    fake = FetchImap([_msg('a.xlsx', '<g1@example.test>'), b'\xff\xfe broken'])
+    fake.login = lambda u, p: ('OK', [])
+    monkeypatch.setattr(imap.imaplib, 'IMAP4_SSL', lambda *a, **k: fake)
+    real = imap.parse_message
+
+    def flaky(raw, data_dir):
+        if raw.startswith(b'\xff'):
+            raise ValueError('boom')
+        return real(raw, data_dir)
+    monkeypatch.setattr(imap, 'parse_message', flaky)
+    inbox = ImapServiceInbox(env(tmp_path), max_parse_failures=3)
+    for _ in range(2):
+        inbox.fetch_new()
+        assert inbox.take_set_aside() == [] and _moved_to(fake) == []
+    inbox.fetch_new()
+    assert _moved_to(fake) == [f'"{DONE_UTF7}"']
+    assert [c[1] for c in fake.log if c[0] == 'MOVE'] == [b'2']
+    (label,) = inbox.take_set_aside()
+    assert label.startswith('UID 2, отпечаток ') and 'example' not in label
+    assert inbox.take_set_aside() == []

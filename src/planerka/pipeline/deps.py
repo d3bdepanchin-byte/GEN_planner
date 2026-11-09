@@ -41,6 +41,9 @@ class Deps:
     prompt: Prompt = field(default_factory=_extract_prompt)
     scanner: IntakeScanner | None = None  # создаётся при первом scan_inbox, живёт с воркером
     mail_failures: dict[str, int] = field(default_factory=dict)  # Message-ID → неудач подряд
+    # Message-ID писем, разобранных и с ответом, но ещё не убранных из входящих (mark_done упал):
+    # для них повторяется только перенос, без разбора и второго ответа.
+    mail_answered: set[str] = field(default_factory=set)
 
     def intake(self) -> IntakeScanner:
         """Наблюдения за приёмником живут в памяти между проходами (окно стабильности)."""
@@ -69,4 +72,6 @@ def build_deps(session: Session, env: Env, names: NameFinder | None = None) -> D
                 transcriber=get_transcriber(get_setting(session, 'asr.engine'),
                                             get_setting(session, 'asr.model'), env),
                 masker=build_masker(session, tokens, names), names=names, tokens=tokens,
-                llm=llm, mailer=SmtpMailer(env), inbox=ImapServiceInbox(env))
+                llm=llm, mailer=SmtpMailer(env),
+                inbox=ImapServiceInbox(
+                    env, max_parse_failures=int(get_setting(session, 'jobs.max_attempts'))))
