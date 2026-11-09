@@ -606,3 +606,25 @@ def test_owner_digest_sends_pending_task_edits_once(session, deps, source_ready,
     assert 'Правки к задачам' in openpyxl.load_workbook(mails[0]['attachments'][0]).sheetnames
     assert 'для сведения' in mails[0]['body'] and 'Возвращать файл не нужно' in mails[0]['body']
     assert edit.status == 'передана владельцу'
+
+
+def test_each_job_gets_its_own_current_time(session, deps, settings, clock, monkeypatch):
+    seen = []
+    monkeypatch.setitem(worker.HANDLERS, 'reminders', lambda s, d, p, now: seen.append(now))
+    session.execute(Job.__table__.delete())
+    for _ in range(2):
+        enqueue(session, 'reminders', {}, clock.now)
+    ticks = iter(clock.now + timedelta(minutes=m) for m in range(0, 100, 10))
+    run_once(session, deps, clock.now, clock=lambda: next(ticks))
+    assert len(seen) == 2 and seen[0] < seen[1]  # долгое первое задание не старит время второго
+
+
+def test_worker_cycle_passes_clock_to_jobs(session, deps, settings, clock, monkeypatch):
+    seen = []
+    monkeypatch.setitem(worker.HANDLERS, 'reminders', lambda s, d, p, now: seen.append(now))
+    session.execute(Job.__table__.delete())
+    enqueue(session, 'reminders', {}, clock.now)
+    later = clock.now + timedelta(minutes=30)
+    worker_cycle(session, deps, WorkerState(needs_recovery=False), clock.now,
+                 clock=lambda: later)
+    assert later in seen

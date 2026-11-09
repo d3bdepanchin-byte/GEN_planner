@@ -49,21 +49,27 @@ class WorkerState:
     needs_recovery: bool = True  # при старте и после сбоя цикла
 
 
-def run_once(session: Session, deps: Deps, now: datetime) -> RunReport:
-    """Все задания, готовые к `now`, включая поставленные по ходу (распознавание → разбор)."""
+def run_once(session: Session, deps: Deps, now: datetime,
+             clock: Callable[[], datetime] | None = None) -> RunReport:
+    """Все готовые задания, включая поставленные по ходу (распознавание → разбор).
+
+    clock — текущее время на каждое задание: распознавание идёт десятки минут, отметки
+    следующих заданий (sent_at, сроки) не должны отставать. Без clock — `now` на весь проход.
+    """
     report = RunReport()
-    while (job := claim_next(session, now)) is not None:
+    tick = clock or (lambda: now)
+    while (job := claim_next(session, at := tick())) is not None:
         job.status = RUNNING
         session.commit()
         try:
-            HANDLERS[job.kind](session, deps, dict(job.payload), now)
+            HANDLERS[job.kind](session, deps, dict(job.payload), at)
             job.status = DONE
             job.last_error = None
             session.commit()
             report.done += 1
         except Exception as e:  # noqa: BLE001 — любая ошибка обработчика: повтор или алерт
             session.rollback()
-            if _retry_or_fail(session, deps, job, e, now):
+            if _retry_or_fail(session, deps, job, e, tick()):
                 report.retried += 1
             else:
                 report.failed += 1
@@ -133,7 +139,8 @@ def _sleep_seconds(session: Session, now: datetime) -> float:
 
 
 def worker_cycle(session: Session, deps: Deps, state: WorkerState, now: datetime,
-                 prepare: Callable[[], None] | None = None) -> float:
+                 prepare: Callable[[], None] | None = None,
+                 clock: Callable[[], datetime] | None = None) -> float:
     """Один проход воркера; возвращает паузу в секундах. Сбой (БД и т.п.) не роняет цикл:
     на следующем удачном проходе задания, оставшиеся «running», возвращаются в очередь."""
     try:
@@ -145,7 +152,7 @@ def worker_cycle(session: Session, deps: Deps, state: WorkerState, now: datetime
             prepare()
         ensure_periodic(session, now)
         session.commit()
-        report = run_once(session, deps, now)
+        report = run_once(session, deps, now, clock)
         if report.ran:
             log.info('воркер: выполнено %d, повтор %d, остановлено %d', report.done,
                      report.retried, report.failed)
@@ -180,7 +187,8 @@ def run_worker(env: Env) -> None:
             deps.masker = build_masker(session, deps.tokens, deps.names)
 
         while not stop:
-            pause = worker_cycle(session, deps, state, datetime.now(timezone.utc), refresh)
+            pause = worker_cycle(session, deps, state, datetime.now(timezone.utc), refresh,
+                                 clock=lambda: datetime.now(timezone.utc))
             _interruptible_sleep(pause, lambda: stop)
     engine.dispose()
 
