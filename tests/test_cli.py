@@ -50,7 +50,8 @@ def cli_db(test_engine, monkeypatch):
     with test_engine.begin() as c:
         c.execute(text("DELETE FROM setting WHERE key IN ('meeting.host_employee_id', "
                        "'registry.closed_access_employee_ids', 'alerts.developer_email', "
-                       "'alerts.sysadmin_email')"))
+                       "'alerts.sysadmin_email', 'intake.opening_phrases.planerka', "
+                       "'backup.keep_days', 'asr.model')"))
 
 
 def test_setting_prints_default_and_sets_values(cli_db, capsys):
@@ -88,3 +89,38 @@ def test_test_alert_without_addresses_exits_2(cli_db, monkeypatch, capsys):
     import planerka.mail.smtp as smtp
     monkeypatch.setattr(smtp, 'SmtpMailer', lambda env: FakeMailer())
     assert main(['test-alert']) == 2
+
+
+def _get(capsys, key):
+    capsys.readouterr()
+    main(['setting', key])
+    return capsys.readouterr().out.strip()
+
+
+def test_setting_single_phrase_for_list_key_becomes_list(cli_db, capsys):
+    assert main(['setting', 'intake.opening_phrases.planerka', 'начинаем планёрку']) == 0
+    assert _get(capsys, 'intake.opening_phrases.planerka') == '["начинаем планёрку"]'
+    assert main(['setting', 'intake.opening_phrases.planerka',
+                 '["начинаем планёрку", "планёрка начинается"]']) == 0
+    assert _get(capsys, 'intake.opening_phrases.planerka') == (
+        '["начинаем планёрку", "планёрка начинается"]')
+
+
+@pytest.mark.parametrize('key, raw', [
+    ('backup.keep_days', 'тридцать'),
+    ('backup.keep_days', 'true'),
+    ('backup.keep_days', '[30]'),
+    ('goals.goals_2027', '[2027]'),
+    ('intake.opening_phrases.planerka', '[1, 2]'),
+    ('alerts.developer_email', '["dev@example.test"]'),
+])
+def test_setting_wrong_type_exits_2(cli_db, capsys, key, raw):
+    before = _get(capsys, key)
+    assert main(['setting', key, raw]) == 2
+    assert 'нужен' in capsys.readouterr().err
+    assert _get(capsys, key) == before
+
+
+def test_setting_numeric_text_for_string_key_stays_string(cli_db, capsys):
+    assert main(['setting', 'asr.model', '3']) == 0
+    assert _get(capsys, 'asr.model') == '"3"'

@@ -126,16 +126,22 @@ def _parse_value(raw: str):
 def _setting(env: Env, args) -> int:
     import json
     from planerka.db import session_scope
-    from planerka.settings import UnknownSetting, get_setting, set_setting
+    from planerka.settings import (
+        SettingTypeError, UnknownSetting, coerce_setting, get_setting, set_setting,
+    )
     try:
+        value = None if args.value is None else coerce_setting(args.key, _parse_value(args.value))
         with session_scope(env.database_url) as session:
             if args.value is None:
                 print(json.dumps(get_setting(session, args.key), ensure_ascii=False))
             else:
-                set_setting(session, args.key, _parse_value(args.value), 'cli')
+                set_setting(session, args.key, value, 'cli')
                 print(f'{args.key}: задано')
     except UnknownSetting:
         print(f'неизвестная настройка: {args.key}', file=sys.stderr)
+        return 2
+    except SettingTypeError as e:
+        print(f'{e}; значение не задано', file=sys.stderr)
         return 2
     return 0
 

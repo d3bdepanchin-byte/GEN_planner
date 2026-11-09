@@ -90,3 +90,57 @@ def set_setting(session: Session, key: str, value: Any, changed_by: str) -> None
         row.changed_by = changed_by
         row.changed_at = func.now()
     session.flush()
+
+
+class SettingTypeError(ValueError):
+    """Значение не того типа, что в config/defaults.toml; сообщение — для человека."""
+
+
+_TYPE_NAMES = {bool: "да/нет (true или false)", int: "целое число", float: "число",
+               str: "строка", list: "список"}
+
+
+def coerce_setting(key: str, value: Any) -> Any:
+    """Значение к типу умолчания из defaults.toml. Одиночное значение для списочного ключа —
+    список из одного элемента; число для строкового — строка. Иное — SettingTypeError."""
+    defaults = load_defaults()
+    if key not in defaults:
+        raise UnknownSetting(key)
+    default = defaults[key]
+    kind = type(default)
+
+    def wrong() -> SettingTypeError:
+        return SettingTypeError(f"{key}: нужен тип «{_TYPE_NAMES.get(kind, kind.__name__)}»")
+
+    if isinstance(default, list):
+        items = value if isinstance(value, list) else [value]
+        if default and not all(_same_type(i, default[0]) for i in items):
+            raise wrong()
+        return items
+    if isinstance(value, list) or isinstance(value, dict):
+        raise wrong()
+    if isinstance(default, bool):
+        if not isinstance(value, bool):
+            raise wrong()
+        return value
+    if isinstance(default, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise wrong()
+        return value
+    if isinstance(default, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise wrong()
+        return float(value)
+    if isinstance(default, str):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return value if isinstance(value, str) else str(value)
+    return value
+
+
+def _same_type(value: Any, sample: Any) -> bool:
+    if isinstance(sample, bool) or isinstance(value, bool):
+        return isinstance(value, bool) and isinstance(sample, bool)
+    if isinstance(sample, float):
+        return isinstance(value, (int, float))
+    return isinstance(value, type(sample))
