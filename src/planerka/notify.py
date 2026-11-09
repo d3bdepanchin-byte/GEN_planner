@@ -27,7 +27,9 @@ def assert_no_pii(text: str, directory: list[EmployeeRef]) -> None:
 def send_alert(mailer: Mailer, to: list[str], kind: str, source_id: int | None,
                detail: str, directory: list[EmployeeRef]) -> None:
     assert_no_pii(detail, directory)
-    if not to:
+    if not to:  # алерт подавлен: видно хотя бы в логе (без текста — тип и номер)
+        log.warning("алерт %s (источник %s) не отправлен: не задан адрес "
+                    "alerts.developer_email", kind, "—" if source_id is None else source_id)
         return
     source = "—" if source_id is None else str(source_id)
     at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

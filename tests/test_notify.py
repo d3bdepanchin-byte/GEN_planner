@@ -67,3 +67,14 @@ def test_safe_alert_swallows_mail_error(directory, caplog):
 
     assert send_alert_safe(Broken(), ['a@example.test'], 'disk', None, 'мало места', directory) is False
     assert 'OSError' in caplog.text
+
+
+def test_suppressed_alert_warns_in_log_without_detail(directory, mailer, caplog):
+    caplog.set_level('WARNING')
+    for _ in range(2):
+        assert send_alert_safe(mailer, [], 'extract', 7, 'остался Смирнов', directory)
+    warnings = [r for r in caplog.records if r.levelname == 'WARNING']
+    assert len(warnings) == 2  # при каждом подавленном алерте
+    assert 'alerts.developer_email' in warnings[0].getMessage()
+    assert 'extract' in warnings[0].getMessage() and 'Смирнов' not in caplog.text
+    assert mailer.sent == []
