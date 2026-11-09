@@ -10,8 +10,6 @@ from pathlib import Path
 
 from planerka.settings import Env, load_env
 
-BACKUP_NOT_READY = 'Бэкапы будут в задаче 21: модуль planerka.backup ещё не готов.'
-
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='planerka', description='Планёрка: записи встреч в задачи')
@@ -31,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser('backup', help='зашифрованный бэкап БД и таблицы токенов')
     rc = sub.add_parser('restore-check', help='проверка восстановления из бэкапа')
     rc.add_argument('path', type=Path)
-    rc.add_argument('--scratch-url', default='', help='временная БД для проверки')
+    rc.add_argument('--scratch-url', default='', help='временная БД (по умолчанию planerka_scratch)')
     return p
 
 
@@ -88,29 +86,26 @@ def _import_registry(env: Env, args) -> int:
     return 0
 
 
-def _backup_module():
-    try:
-        from planerka import backup  # задача 21
-    except ImportError:
-        print(BACKUP_NOT_READY, file=sys.stderr)
-        return None
-    return backup
-
-
 def _backup(env: Env, args) -> int:
-    backup = _backup_module()
-    if backup is None:
+    from planerka.backup import BackupError, make_backup
+    try:
+        paths = make_backup(env, datetime.now(timezone.utc))
+    except BackupError as e:
+        print(e, file=sys.stderr)
         return 2
-    for path in backup.make_backup(env, datetime.now(timezone.utc)):
+    for path in paths:
         print(path)
     return 0
 
 
 def _restore_check(env: Env, args) -> int:
-    backup = _backup_module()
-    if backup is None:
+    from planerka.backup import BackupError, check_restore
+    try:
+        counts = check_restore(args.path, env, args.scratch_url)
+    except BackupError as e:
+        print(e, file=sys.stderr)
         return 2
-    for table, rows in backup.check_restore(args.path, env, args.scratch_url).items():
+    for table, rows in counts.items():
         print(f'{table}: {rows}')
     return 0
 

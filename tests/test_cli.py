@@ -21,3 +21,21 @@ def test_parser_knows_all_commands():
 def test_unknown_command_exits():
     with pytest.raises(SystemExit):
         main(['nonsense'])
+
+
+def test_backup_without_passphrase_exits_2(monkeypatch, capsys):
+    monkeypatch.setenv('DATABASE_URL', 'postgresql+psycopg://u:p@db/planerka')
+    monkeypatch.delenv('BACKUP_PASSPHRASE', raising=False)
+    assert main(['backup']) == 2
+    assert 'BACKUP_PASSPHRASE' in capsys.readouterr().err
+
+
+def test_backup_and_restore_check_call_module(monkeypatch, capsys, tmp_path):
+    import planerka.backup as backup
+    monkeypatch.setenv('DATABASE_URL', 'postgresql+psycopg://u:p@db/planerka')
+    monkeypatch.setattr(backup, 'make_backup', lambda env, now: [tmp_path / 'planerka_x.dump.gpg'])
+    monkeypatch.setattr(backup, 'check_restore', lambda path, env, url: {'task': 3})
+    assert main(['backup']) == 0
+    assert 'planerka_x.dump.gpg' in capsys.readouterr().out
+    assert main(['restore-check', 'b.dump.gpg']) == 0
+    assert 'task: 3' in capsys.readouterr().out
