@@ -8,7 +8,7 @@ from sqlalchemy import select
 from planerka.core.directory import import_employees
 from planerka.core.numbering import next_task_number
 from planerka.core.registry_import import RegistryMapping, import_registry
-from planerka.db.models import History, Task
+from planerka.db.models import History, Source, Task
 
 MAPPING = RegistryMapping.load(Path('config/registry_mapping.toml'))
 HEADER = ['Номер', 'Задача', 'Тип', 'Приоритет', 'Цель 2027', 'Ответственный',
@@ -123,3 +123,20 @@ def test_empty_type_stays_empty_with_question(session, directory, tmp_path):
     t = _task(session, 7)
     assert t.type is None
     assert 'тип не указан: уточнить' in t.questions
+
+
+def test_number_taken_by_task_from_recording_not_overwritten(session, directory, tmp_path):
+    src = Source(kind='запись', path='x', sha256='f4' * 32, status='разобран')
+    session.add(src)
+    session.flush()
+    session.add(Task(number=9, title='Из записи', status='в работе', source_id=src.id))
+    session.flush()
+    p = _book(tmp_path / 'r.xlsx', [
+        [9, 'Из реестра', 'поручение', None, None, 'Иванова Ольга', None, None, None, 'выполнена'],
+        [10, 'Новая', 'поручение', None, None, 'Иванова Ольга', None, None, None, 'в работе']])
+    rep = import_registry(session, p, MAPPING)
+    t = _task(session, 9)
+    assert (t.title, t.status, t.source_id) == ('Из записи', 'в работе', src.id)
+    assert rep.problems == ['строка 2: номер занят задачей из записи']
+    assert (rep.created, rep.updated) == (1, 0)
+    assert session.scalars(select(History).where(History.task_id == t.id)).all() == []

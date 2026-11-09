@@ -1,4 +1,7 @@
-"""Импорт реестра пилота из xlsx: номера И-NNN сохраняются, нумерация продолжается."""
+"""Импорт реестра пилота из xlsx: номера И-NNN сохраняются, нумерация продолжается.
+
+Повторный импорт обновляет задачи реестра; задачи из записей (source_id) не трогает.
+"""
 import tomllib
 from contextlib import closing
 from datetime import date, datetime
@@ -132,6 +135,9 @@ def import_registry(session: Session, path: Path, mapping: RegistryMapping,
                     questions.append(f"не удалось разобрать дату: {col}")
 
         task = session.scalars(select(Task).where(Task.number == number)).first()
+        if task is not None and task.source_id is not None:  # задачу ведёт система (F4)
+            report.problems.append(f"строка {n}: номер занят задачей из записи")
+            continue
         is_new = task is None
         if is_new:
             task = Task(number=number)
