@@ -21,7 +21,9 @@ from planerka.pipeline.handlers.common import alert, requeue_hint, ru_date
 from planerka.pipeline.transcripts import meeting_dir
 from planerka.reminders import company_tz, run_reminders, set_due
 from planerka.review.executor import build_executor_file
-from planerka.review.owner import build_owner_file, pending_owner_items
+from planerka.review.owner import (
+    EDIT_SENT, build_owner_file, pending_owner_items, pending_task_edits,
+)
 from planerka.settings import get_setting
 
 log = logging.getLogger(__name__)
@@ -172,18 +174,22 @@ def _registry_owner(session: Session) -> Employee | None:
 def owner_digest(session: Session, deps: Deps, payload: dict, now: datetime) -> None:
     """Источник готов (файлы вернулись или эскалированы) — файл владельцу реестра.
 
-    Тот же набор номеров не отправляется второй раз, пока прошлый файл владельца не вернулся.
+    Повод собрать файл — номер, которого ещё не было ни в одном отправленном файле владельца,
+    или непереданная правка к задаче (F7). Строки, оставленные владельцем пустыми (F5), сами
+    новый файл не вызывают: едут вместе со следующим.
     """
     by_source: dict[int, set[int]] = defaultdict(set)
     for task, _ in pending_owner_items(session):
         if task.source_id is not None:
             by_source[task.source_id].add(task.number)
-    ready = [sid for sid in sorted(by_source) if _source_ready(session, sid)]
-    wanted = {n for sid in ready for n in by_source[sid]}
+    edits = pending_task_edits(session)
+    edit_sources = {e.source_id for e in edits if e.source_id is not None}
+    ready = [sid for sid in sorted(set(by_source) | edit_sources) if _source_ready(session, sid)]
+    wanted = {n for sid in ready for n in by_source.get(sid, ())}
     covered = {n for rf in session.scalars(select(ReviewFile).where(
-        ReviewFile.kind == 'owner', ReviewFile.sent_at.is_not(None),
-        ReviewFile.returned_at.is_(None))) for n in rf.task_numbers}
-    if not wanted or wanted <= covered:
+        ReviewFile.kind == 'owner', ReviewFile.sent_at.is_not(None))) for n in rf.task_numbers}
+    edits_ready = any(e.source_id is None or e.source_id in ready for e in edits)
+    if not (wanted - covered) and not edits_ready:
         return
 
     owner = _registry_owner(session)
@@ -199,9 +205,22 @@ def owner_digest(session: Session, deps: Deps, payload: dict, now: datetime) -> 
     if rf is None:
         return
     rf.sent_at = now
-    body = (f'Во вложении — задачи, которые ждут вашего решения: {len(rf.task_numbers)}.\n'
-            'В колонке «Решение» выберите для каждой строки: «утверждаю» или «отклоняю».\n'
-            'Верните файл ответом на это письмо.\n')
-    rf.message_id = deps.mailer.send(owner.email, 'Планёрка: задачи на утверждение', body,
-                                     [Path(rf.path)])
-    log.info('файл владельцу реестра %d отправлен, задач %d', rf.id, len(rf.task_numbers))
+    sent_edits = pending_task_edits(session)  # те же, что попали в файл: одна транзакция
+    edits_line = (f'На листе «Правки к задачам» — изменения к задачам из записи: '
+                  f'{len(sent_edits)}, для сведения. Система их не применяет, внесите вручную.\n'
+                  if sent_edits else '')
+    if rf.task_numbers:
+        body = (f'Во вложении — задачи, которые ждут вашего решения: {len(rf.task_numbers)}.\n'
+                'В колонке «Решение» выберите для каждой строки: «утверждаю» или «отклоняю». '
+                'Пустая строка остаётся как есть.\n'
+                f'{edits_line}'
+                'Верните файл ответом на это письмо.\n')
+        subject = 'Планёрка: задачи на утверждение'
+    else:
+        body = f'{edits_line}Возвращать файл не нужно.\n'
+        subject = 'Планёрка: правки к задачам'
+    rf.message_id = deps.mailer.send(owner.email, subject, body, [Path(rf.path)])
+    for edit in sent_edits:
+        edit.status = EDIT_SENT
+    log.info('файл владельцу реестра %d отправлен, задач %d, правок %d', rf.id,
+             len(rf.task_numbers), len(sent_edits))

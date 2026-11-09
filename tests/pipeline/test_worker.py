@@ -4,11 +4,13 @@ from datetime import timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import openpyxl
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from planerka.db.models import Job, ReviewFile, Source
+from planerka.core.numbering import next_task_number
+from planerka.db.models import Job, ReviewFile, Source, Task, TaskEdit
 from planerka.llm.base import JsonLLMBase, LLMUnavailable
 from planerka.mail.base import IncomingMail, MailError
 from planerka.mail.fake import FakeInbox
@@ -563,3 +565,44 @@ def test_replacing_extracted_recording_alerts_not_transcribed(session, deps, set
     alerts = [m for m in deps.mailer.sent if m['subject'] == 'Планёрка: алерт scan_inbox']
     assert len(alerts) == 1 and f'planerka requeue {second.id}' in alerts[0]['body']
     assert str(first.id) in alerts[0]['body'] and 'запись.mp3' not in alerts[0]['body']
+
+
+def test_owner_digest_not_resent_for_rows_left_empty(session, deps, processed_source,
+                                                     registry_owner, clock):
+    rf = session.scalars(select(ReviewFile).where(ReviewFile.kind == 'executor')).one()
+    rf.returned_at = clock.now
+    enqueue(session, 'owner_digest', {})
+    run_once(session, deps, clock.now)
+    owner_rf = session.scalars(select(ReviewFile).where(ReviewFile.kind == 'owner')).one()
+    owner_rf.returned_at = clock.now  # владелец вернул файл, все строки оставил пустыми (F5)
+    for i in range(1, 3):
+        enqueue(session, 'owner_digest', {})
+        run_once(session, deps, clock.now + timedelta(hours=i))
+    assert len(_owner_mails(deps, registry_owner)) == 1
+
+
+def _edit_for_task_in_work(session, source):
+    task = Task(number=next_task_number(session), title='В работе', status='в работе',
+                questions=[], flags=[])
+    session.add(task)
+    session.flush()
+    edit = TaskEdit(task_number=task.number, change='срок перенести', quote='к первому',
+                    timecode='[01:00]', source_id=source.id, status='на подтверждении')
+    session.add(edit)
+    session.flush()
+    return edit
+
+
+def test_owner_digest_sends_pending_task_edits_once(session, deps, source_ready, registry_owner,
+                                                    clock):
+    source_ready.status = 'разобран'
+    session.execute(Job.__table__.delete())
+    edit = _edit_for_task_in_work(session, source_ready)
+    for i in range(2):
+        enqueue(session, 'owner_digest', {})
+        run_once(session, deps, clock.now + timedelta(hours=i))
+    mails = _owner_mails(deps, registry_owner)
+    assert len(mails) == 1
+    assert 'Правки к задачам' in openpyxl.load_workbook(mails[0]['attachments'][0]).sheetnames
+    assert 'для сведения' in mails[0]['body'] and 'Возвращать файл не нужно' in mails[0]['body']
+    assert edit.status == 'передана владельцу'

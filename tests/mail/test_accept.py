@@ -199,9 +199,10 @@ def test_owner_file_from_other_sender_rejected(session, mailer, owner_review):
 
 
 def test_owner_file_errors_sent(session, mailer, owner_review):
-    mail = make_mail([fill_owner(owner_review.path, ['утверждаю'])], sender=OWNER_ADDR)
+    mail = make_mail([fill_owner(owner_review.path, ['утверждаю', 'может быть'])],
+                     sender=OWNER_ADDR)
     assert accept_review_mail(session, mail, mailer) == AcceptOutcome.ERRORS_SENT
-    assert 'не выбрано решение' in mailer.sent[-1]['body']
+    assert 'решение «может быть» не из списка' in mailer.sent[-1]['body']
 
 
 def test_errors_sent_as_numbered_list(session, mailer, review, review_tasks):

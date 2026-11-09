@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from planerka.core.numbering import next_task_number
 from planerka.core.statuses import TaskStatus
-from planerka.db.models import History, ReviewFile, Task
+from planerka.db.models import History, ReviewFile, Task, TaskEdit
 from planerka.review.executor import ReviewErrors, ReviewRejected
 from planerka.review.owner import (
     ParsedOwnerReview, apply_owner_review, build_owner_file, parse_owner_file,
@@ -274,10 +274,10 @@ def test_invalid_registry_and_priority_are_errors(session, owner, confirmed_task
     assert isinstance(res, ReviewErrors) and len(res.lines) == 2
 
 
-def test_missing_decision_is_error(session, owner, confirmed_task, tmp_path):
+def test_missing_decision_is_not_error(session, owner, confirmed_task, tmp_path):
     rf = build_owner_file(session, owner, tmp_path, NOW)
     res = parse_owner_file(rf.path)
-    assert isinstance(res, ReviewErrors) and 'не выбрано решение' in res.lines[0]
+    assert isinstance(res, ParsedOwnerReview) and res.rows == []  # F5: строка остаётся как есть
 
 
 def test_regulation_priority_must_be_empty(session, owner, smirnov, tmp_path):
@@ -312,3 +312,187 @@ def test_wrong_review_id_rejected(session, owner, confirmed_task, tmp_path):
     parsed.review_id += 1
     with pytest.raises(ReviewRejected):
         apply_owner_review(session, review, parsed)
+
+
+# --- F5: пустое решение, разделы, шаг исполнителя пропущен ---
+
+SKIP_NOTE = 'шаг исполнителя пропущен: решение владельца реестра'
+
+
+def cell(review, number, column):
+    ws = openpyxl.load_workbook(review.path)['Задачи']
+    head = {c.value: c.column for c in ws[1]}
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, head['Номер']).value == f'И-{number:03d}':
+            return ws.cell(r, head[column]).value
+    raise KeyError(number)
+
+
+def notes(session, t):
+    return [h.new for h in session.scalars(select(History).where(
+        History.task_id == t.id, History.event == 'примечание'))]
+
+
+def test_empty_decision_row_left_as_is(session, owner, confirmed_task, smirnov, tmp_path):
+    other = make_task(session, smirnov, 'Подумать', TaskStatus.CONFIRMED_BY_EXECUTOR.value)
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {confirmed_task.number: {'Решение': 'утверждаю'}})
+    assert [r.number for r in parsed.rows] == [confirmed_task.number]
+    report = apply_owner_review(session, review, parsed, now=NOW)
+    assert (report.approved, report.rejected) == (1, 0)
+    assert other.status == 'подтверждена исполнителем'
+
+
+def test_reassigned_and_rejected_have_empty_owner_cell(session, owner, confirmed_task,
+                                                       reassigned_task, rejected_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    assert cell(rf, confirmed_task.number, 'Ответственный') == 'Смирнов Александр'
+    assert cell(rf, reassigned_task.number, 'Ответственный') is None
+    assert cell(rf, rejected_task.number, 'Ответственный') is None
+
+
+@pytest.mark.parametrize('fixture', ['reassigned_task', 'rejected_task'])
+def test_reassigned_or_rejected_approve_needs_owner(session, owner, fixture, request, tmp_path):
+    t = request.getfixturevalue(fixture)
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    fill(rf.path, {t.number: {'Решение': 'утверждаю'}})
+    res = parse_owner_file(rf.path)
+    assert isinstance(res, ReviewErrors)
+    assert res.lines == ['строка 2: выберите ответственного']
+
+
+@pytest.mark.parametrize('fixture', ['reassigned_task', 'rejected_task'])
+def test_reassigned_or_rejected_approved_with_owner(session, owner, fixture, request, employees,
+                                                    tmp_path):
+    t = request.getfixturevalue(fixture)
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {t.number: {'Решение': 'утверждаю',
+                                              'Ответственный': 'Попов Александр'}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert (t.status, t.owner_id) == ('в работе', employees[2].id)
+    assert notes(session, t) == [SKIP_NOTE]
+
+
+def test_not_returned_cannot_be_approved(session, owner, escalated_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    fill(rf.path, {escalated_task.number: {'Решение': 'утверждаю'}})
+    res = parse_owner_file(rf.path)
+    assert isinstance(res, ReviewErrors)
+    assert res.lines == ['строка 2: задача ждёт исполнителя — вынесите на планёрку или отклоните']
+
+
+@pytest.mark.parametrize('decision, status', [(None, 'на подтверждении'),
+                                              ('отклоняю', 'отклонена')])
+def test_not_returned_empty_or_reject(session, owner, escalated_task, decision, status, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {escalated_task.number: {'Решение': decision}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert escalated_task.status == status
+
+
+def test_edited_section_cell_does_not_bypass_rules(session, owner, escalated_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {escalated_task.number: {
+        'Решение': 'утверждаю', 'Раздел': 'подтверждена исполнителем'}})
+    with pytest.raises(ReviewRejected) as exc:
+        apply_owner_review(session, review, parsed, now=NOW)
+    assert exc.value.errors.lines == [
+        'строка 2: задача ждёт исполнителя — вынесите на планёрку или отклоните']
+    assert escalated_task.status == 'на подтверждении'
+
+
+def test_disputed_approval_records_skipped_executor_step(session, owner, no_owner_task, smirnov,
+                                                         tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {no_owner_task.number: {
+        'Решение': 'утверждаю', 'Ответственный': 'Смирнов Александр'}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert notes(session, no_owner_task) == [SKIP_NOTE]
+
+
+def test_confirmed_approval_has_no_skip_note(session, owner, confirmed_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {confirmed_task.number: {'Решение': 'утверждаю'}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert notes(session, confirmed_task) == []
+
+
+def test_howto_explains_sections(session, owner, confirmed_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    text = '\n'.join(r[0].value for r in openpyxl.load_workbook(rf.path)['Как заполнить'].iter_rows())
+    assert 'Пустое «Решение»' in text
+    assert '«переназначена», «отклонена исполнителем»' in text
+    assert 'вынесите на планёрку или отклоните' in text
+    assert '«Срок»' in text and '«Правки к задачам»' in text
+
+
+# --- F6: «Задача» и «Срок» владельца применяются ---
+
+def edits_of(session, t):
+    return [(h.old, h.new, h.actor) for h in session.scalars(select(History).where(
+        History.task_id == t.id, History.event == 'правка').order_by(History.id))]
+
+
+@pytest.mark.parametrize('due', ['20.11.2026', datetime(2026, 11, 20)])
+def test_owner_title_and_due_applied(session, owner, confirmed_task, due, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {confirmed_task.number: {
+        'Решение': 'утверждаю', 'Задача': 'Подготовить прайс-лист на 2027', 'Срок': due}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert confirmed_task.title == 'Подготовить прайс-лист на 2027'
+    assert confirmed_task.due_date == date(2026, 11, 20)
+    actor = f'владелец реестра:{owner.id}'
+    assert edits_of(session, confirmed_task) == [
+        ('название: Подготовить прайс-лист', 'название: Подготовить прайс-лист на 2027', actor),
+        ('срок: 2026-11-14', 'срок: 2026-11-20', actor)]
+
+
+def test_unchanged_title_and_due_leave_no_history(session, owner, confirmed_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {confirmed_task.number: {'Решение': 'утверждаю'}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert edits_of(session, confirmed_task) == []
+
+
+def test_owner_bad_due_is_error(session, owner, confirmed_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    fill(rf.path, {confirmed_task.number: {'Решение': 'утверждаю', 'Срок': 'завтра'}})
+    res = parse_owner_file(rf.path)
+    assert isinstance(res, ReviewErrors)
+    assert res.lines == ['строка 2: срок «завтра» не распознан, нужен формат дд.мм.гггг']
+
+
+def test_rejected_row_edits_not_applied(session, owner, confirmed_task, tmp_path):
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    review, parsed = returned(rf, {confirmed_task.number: {'Решение': 'отклоняю',
+                                                           'Задача': 'Другое'}})
+    apply_owner_review(session, review, parsed, now=NOW)
+    assert confirmed_task.title == 'Подготовить прайс-лист'
+
+
+# --- F7: правки к задачам — лист для сведения ---
+
+def test_task_edits_sheet_for_information(session, owner, confirmed_task, smirnov, tmp_path):
+    target = make_task(session, smirnov, 'В работе', TaskStatus.IN_PROGRESS.value)
+    session.add_all([
+        TaskEdit(task_number=target.number, change='срок перенести на 01.12', quote='давай к первому',
+                 timecode='[02:10]', status='на подтверждении'),
+        TaskEdit(task_number=target.number, change='уже передана', status='передана владельцу')])
+    session.flush()
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    ws = openpyxl.load_workbook(rf.path)['Правки к задачам']
+    rows = [[c.value for c in r] for r in ws.iter_rows()]
+    assert rows == [['Номер', 'Что меняется', 'Цитата', 'Таймкод'],
+                    [f'И-{target.number:03d}', 'срок перенести на 01.12', 'давай к первому',
+                     '[02:10]']]
+    assert target.number not in rf.task_numbers  # правки не решаются в этом файле
+
+
+def test_file_with_only_task_edits(session, owner, smirnov, tmp_path):
+    target = make_task(session, smirnov, 'В работе', TaskStatus.IN_PROGRESS.value)
+    session.add(TaskEdit(task_number=target.number, change='добавить склад 2',
+                         status='на подтверждении'))
+    session.flush()
+    rf = build_owner_file(session, owner, tmp_path, NOW)
+    assert rf is not None and rf.task_numbers == []
+    assert 'Правки к задачам' in openpyxl.load_workbook(rf.path).sheetnames

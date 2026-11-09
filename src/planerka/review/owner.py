@@ -1,6 +1,11 @@
-"""Файл владельцу реестра: утвердить или отклонить задачи (Д-72, Д-74)."""
+"""Файл владельцу реестра: утвердить или отклонить задачи (Д-72, Д-74).
+
+Пустое «Решение» — строка остаётся как есть. Что можно утвердить, решает раздел задачи по
+данным в БД на момент приёма, а не ячейка «Раздел» (F5). «Задача» и «Срок» владельца
+применяются при «утверждаю» (F6). Правки к задачам из записей — лист для сведения (F7).
+"""
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -11,17 +16,17 @@ from sqlalchemy.orm import Session
 from planerka.core.directory import norm_name
 from planerka.core.numbering import format_number
 from planerka.core.statuses import TaskStatus, transition
-from planerka.db.models import Employee, History, ReviewFile, Task
+from planerka.db.models import Employee, History, ReviewFile, Task, TaskEdit
 from planerka.review.executor import (
     FLAG_REASSIGNED, FLAG_REJECTED, ApplyReport, ReviewErrors, ReviewRejected, _add_unique, _edit,
 )
 from planerka.review.xlsx import (
     NOT_FROM_SYSTEM, add_employee_dropdown, add_list_validation, cell_number, cell_text,
-    employee_index, read_meta, style_sheet, write_meta,
+    employee_index, parse_date, read_meta, style_sheet, write_meta,
 )
 
 __all__ = ["OwnerDecision", "OwnerRow", "ParsedOwnerReview", "pending_owner_items",
-           "build_owner_file", "parse_owner_file", "apply_owner_review"]
+           "pending_task_edits", "build_owner_file", "parse_owner_file", "apply_owner_review"]
 
 SECTION_CONFIRMED = "подтверждена исполнителем"
 SECTION_AMBIGUOUS = "спорная: неоднозначное имя"
@@ -32,6 +37,14 @@ SECTION_NOT_RETURNED = "не вернулся файл"
 SECTIONS = [SECTION_CONFIRMED, SECTION_AMBIGUOUS, SECTION_NO_OWNER, SECTION_REASSIGNED,
             SECTION_REJECTED, SECTION_NOT_RETURNED]
 DISPUTED = (SECTION_AMBIGUOUS, SECTION_NO_OWNER)
+# Утвердить можно только с ответственным, выбранным владельцем: в файле ячейка пустая.
+CHOOSE_OWNER = (*DISPUTED, SECTION_REASSIGNED, SECTION_REJECTED)
+OWNER_CELL_EMPTY = (SECTION_REASSIGNED, SECTION_REJECTED)
+NEED_OWNER = "выберите ответственного"
+WAITS_EXECUTOR = "задача ждёт исполнителя — вынесите на планёрку или отклоните"
+SKIPPED_EXECUTOR = "шаг исполнителя пропущен: решение владельца реестра"
+EDIT_PENDING = TaskStatus.CANDIDATE.value  # статус TaskEdit при разборе записи
+EDIT_SENT = "передана владельцу"  # TaskEdit ушла в файле владельца; применяется вручную
 CHOOSE_OWNER_PREFIX = "выбрать ответственного"
 COMMENT_PREFIX = "комментарий владельца реестра: "
 REGISTRIES = ["общий", "закрытый"]
@@ -41,20 +54,28 @@ REGULATION = "регламент"
 TASKS_SHEET = "Задачи"
 HOWTO_SHEET = "Как заполнить"
 EMPLOYEES_SHEET = "Справочник"
+EDITS_SHEET = "Правки к задачам"
+EDITS_HEADERS = ["Номер", "Что меняется", "Цитата", "Таймкод"]
+EDITS_WIDTHS = [9, 50, 50, 10]
 HEADERS = ["Номер", "Задача", "Ответственный", "Срок", "Раздел", "Вопросы", "Реестр",
            "Приоритет", "Решение", "Комментарий"]
 WIDTHS = [9, 40, 28, 12, 26, 40, 12, 10, 14, 30]
 WRAP_COLS = {2, 5, 6, 10}
 DATE_FORMAT = "DD.MM.YYYY"
 HOWTO = [
-    "В колонке «Решение» выберите для каждой строки: «утверждаю» или «отклоняю».",
-    "«Утверждаю»: задача уходит в работу. Проверьте «Ответственный», «Реестр» "
-    "(общий или закрытый) и «Приоритет» (A, B, C). Для регламента приоритет оставьте пустым.",
-    "Разделы «спорная: …»: если утверждаете, выберите ответственного из списка. "
-    "Без него файл не примут.",
+    "В колонке «Решение» выберите для каждой строки: «утверждаю» или «отклоняю». "
+    "Пустое «Решение» — задача остаётся как есть и придёт в следующем файле.",
+    "«Утверждаю»: задача уходит в работу. Проверьте «Задача», «Срок» (дд.мм.гггг), "
+    "«Ответственный», «Реестр» (общий или закрытый) и «Приоритет» (A, B, C). "
+    "Исправленные «Задача» и «Срок» применяются. Для регламента приоритет оставьте пустым.",
+    "Разделы «спорная: …», «переназначена», «отклонена исполнителем»: если утверждаете, "
+    "выберите ответственного из списка. Без него файл не примут.",
+    "«Не вернулся файл»: исполнитель не ответил в срок. Утвердить нельзя — вынесите на "
+    "планёрку или отклоните. Можно оставить пустым.",
     "«Реестр» заполнен предложением системы. Закрытым задачу делаете вы: решите сами.",
-    "Колонка «Вопросы» — что осталось неясным по задаче. «Не вернулся файл»: исполнитель "
-    "не ответил в срок.",
+    "Колонка «Вопросы» — что осталось неясным по задаче.",
+    "Лист «Правки к задачам» (если есть) — для сведения: изменения к задачам из записи встречи. "
+    "Система их не применяет, внесите вручную.",
     "Верните файл ответом на письмо, в формате .xlsx. Строки и листы не добавляйте и не удаляйте.",
 ]
 
@@ -82,6 +103,8 @@ class OwnerRow:
     comment: str | None
     row: int = 0  # номер строки в Excel, для сообщений об ошибках
     section: str | None = None
+    title: str | None = None  # «Задача»: пусто — без изменений
+    due_date: date | None = None  # «Срок»: пусто — без изменений
 
 
 @dataclass
@@ -109,13 +132,34 @@ def _section(task: Task, not_returned: set[int]) -> str | None:
     return None
 
 
-def pending_owner_items(session: Session) -> list[tuple[Task, str]]:
-    """Задачи, которые ждут решения владельца реестра, с разделом; по разделам и номерам."""
-    not_returned: set[int] = set()
+def _not_returned(session: Session) -> set[int]:
+    """Номера из файлов исполнителей, которые эскалированы и не вернулись."""
+    numbers: set[int] = set()
     for rf in session.scalars(select(ReviewFile).where(
             ReviewFile.kind == "executor", ReviewFile.escalated_at.is_not(None),
             ReviewFile.returned_at.is_(None))):
-        not_returned.update(rf.task_numbers)
+        numbers.update(rf.task_numbers)
+    return numbers
+
+
+def _approve_problem(section: str | None, owner_chosen: bool) -> str | None:
+    """Почему «утверждаю» нельзя принять для раздела; None — можно."""
+    if section in (None, SECTION_NOT_RETURNED):
+        return WAITS_EXECUTOR
+    if section in CHOOSE_OWNER and not owner_chosen:
+        return NEED_OWNER
+    return None
+
+
+def pending_task_edits(session: Session) -> list[TaskEdit]:
+    """Правки к задачам из записей, ещё не переданные владельцу реестра."""
+    return list(session.scalars(select(TaskEdit).where(TaskEdit.status == EDIT_PENDING)
+                                .order_by(TaskEdit.task_number, TaskEdit.id)))
+
+
+def pending_owner_items(session: Session) -> list[tuple[Task, str]]:
+    """Задачи, которые ждут решения владельца реестра, с разделом; по разделам и номерам."""
+    not_returned = _not_returned(session)
     pending = [TaskStatus.CANDIDATE.value, TaskStatus.CONFIRMED_BY_EXECUTOR.value]
     items: list[tuple[int, Task, str]] = []
     for t in session.scalars(select(Task).where(Task.status.in_(pending)).order_by(Task.number)):
@@ -128,9 +172,11 @@ def pending_owner_items(session: Session) -> list[tuple[Task, str]]:
 
 def build_owner_file(session: Session, owner: Employee, out_dir: Path,
                      now: datetime) -> ReviewFile | None:
-    """Файл владельцу: всё, что ждёт его решения. Решать нечего — None."""
+    """Файл владельцу: всё, что ждёт его решения, и непереданные правки к задачам (для
+    сведения). Нет ни того, ни другого — None. Статус правок меняет вызывающий после отправки."""
     items = pending_owner_items(session)
-    if not items:
+    edits = pending_task_edits(session)
+    if not items and not edits:
         return None
 
     review = ReviewFile(kind="owner", employee_id=owner.id, path="",
@@ -144,16 +190,24 @@ def build_owner_file(session: Session, owner: Employee, out_dir: Path,
     ws.title = TASKS_SHEET
     ws.append(HEADERS)
     for t, section in items:
-        ws.append([format_number(t.number), t.title, names.get(t.owner_id), t.due_date, section,
+        owner_cell = None if section in OWNER_CELL_EMPTY else names.get(t.owner_id)
+        ws.append([format_number(t.number), t.title, owner_cell, t.due_date, section,
                    "\n".join(t.questions or []), t.registry_suggested or t.registry, t.priority])
     last = len(items) + 1
     for r in range(2, last + 1):
         ws.cell(r, 4).number_format = DATE_FORMAT
     style_sheet(ws, WIDTHS, WRAP_COLS)
-    add_list_validation(ws, f"G2:G{last}", REGISTRIES)
-    add_list_validation(ws, f"H2:H{last}", PRIORITIES)
-    add_list_validation(ws, f"I2:I{last}", [d.value for d in OwnerDecision])
-    add_employee_dropdown(wb, ws, session, f"C2:C{last}", EMPLOYEES_SHEET)
+    if items:  # файл может состоять из одних правок к задачам
+        add_list_validation(ws, f"G2:G{last}", REGISTRIES)
+        add_list_validation(ws, f"H2:H{last}", PRIORITIES)
+        add_list_validation(ws, f"I2:I{last}", [d.value for d in OwnerDecision])
+        add_employee_dropdown(wb, ws, session, f"C2:C{last}", EMPLOYEES_SHEET)
+    if edits:
+        es = wb.create_sheet(EDITS_SHEET)
+        es.append(EDITS_HEADERS)
+        for e in edits:
+            es.append([format_number(e.task_number), e.change, e.quote, e.timecode])
+        style_sheet(es, EDITS_WIDTHS, {2, 3})
 
     how = wb.create_sheet(HOWTO_SHEET)
     how.column_dimensions["A"].width = 110
@@ -220,8 +274,7 @@ def parse_owner_file(path: Path) -> ParsedOwnerReview | ReviewErrors:
 
         raw_decision = cell_text(get(vals, "Решение"))
         if raw_decision is None:
-            errors.append(f"строка {r}: не выбрано решение")
-            continue
+            continue  # пустое решение: строка остаётся как есть (F5)
         decision = normalize_owner_decision(raw_decision)
         if decision is None:
             errors.append(f"строка {r}: решение «{raw_decision}» не из списка "
@@ -236,8 +289,16 @@ def parse_owner_file(path: Path) -> ParsedOwnerReview | ReviewErrors:
             rows.append(OwnerRow(number, decision, None, "", None, comment, r, section))
             continue
         problems = []
-        if owner is None and section in DISPUTED:
-            problems.append(f"строка {r}: выберите ответственного")
+        # Ячейка «Раздел» — подсказка для быстрого ответа; окончательно решает приём по БД.
+        approve_problem = _approve_problem(section, owner is not None) if section in SECTIONS \
+            else None
+        if approve_problem:
+            problems.append(f"строка {r}: {approve_problem}")
+        try:
+            due = parse_date(get(vals, "Срок"))
+        except ValueError:
+            problems.append(f"строка {r}: срок «{cell_text(get(vals, 'Срок'))}» не распознан, "
+                            "нужен формат дд.мм.гггг")
         if registry not in REGISTRIES:
             problems.append(f"строка {r}: реестр «{registry or '—'}» не из списка "
                             "(общий, закрытый)")
@@ -248,7 +309,8 @@ def parse_owner_file(path: Path) -> ParsedOwnerReview | ReviewErrors:
         if problems:
             errors.extend(problems)
             continue
-        rows.append(OwnerRow(number, decision, owner, registry, priority, comment, r, section))
+        rows.append(OwnerRow(number, decision, owner, registry, priority, comment, r, section,
+                             cell_text(get(vals, "Задача")), due))
     if errors:
         return ReviewErrors(errors)
     return ParsedOwnerReview(review_id, rows)
@@ -261,6 +323,7 @@ def apply_owner_review(session: Session, review: ReviewFile, parsed: ParsedOwner
     if parsed.review_id != review.id:
         raise ReviewRejected(ReviewErrors([NOT_FROM_SYSTEM]))
     names, by_name = employee_index(session)
+    not_returned = _not_returned(session)
     errors: list[str] = []
     owners: dict[int, int] = {}
     pending = {TaskStatus.CANDIDATE.value, TaskStatus.CONFIRMED_BY_EXECUTOR.value}
@@ -283,8 +346,11 @@ def apply_owner_review(session: Session, review: ReviewFile, parsed: ParsedOwner
                 errors.append(f"строка {row.row}: ответственный указан неоднозначно в справочнике")
             else:
                 owners[row.number] = by_name[key]
-        if task.owner_id is None and row.number not in owners:
-            errors.append(f"строка {row.row}: выберите ответственного")
+        problem = _approve_problem(_section(task, not_returned), row.number in owners)
+        if problem is None and task.owner_id is None and row.number not in owners:
+            problem = NEED_OWNER
+        if problem:
+            errors.append(f"строка {row.row}: {problem}")
         if task.type == REGULATION and row.priority:
             errors.append(f"строка {row.row}: у регламента приоритет не ставится, очистите колонку")
     if errors:
@@ -309,8 +375,15 @@ def apply_owner_review(session: Session, review: ReviewFile, parsed: ParsedOwner
                                 old=f"ответственный: {names.get(task.owner_id, '—')}",
                                 new=f"ответственный: {names[new_owner]}"))
             task.owner_id = new_owner
+        if row.title:
+            _edit(session, task, "название", "title", row.title, actor)
+        if row.due_date:
+            _edit(session, task, "срок", "due_date", row.due_date, actor)
         _edit(session, task, "реестр", "registry", row.registry, actor)
         _edit(session, task, "приоритет", "priority", row.priority, actor)
+        if task.status == TaskStatus.CANDIDATE.value:
+            session.add(History(task_id=task.id, event="примечание", new=SKIPPED_EXECUTOR,
+                                actor=actor))
         transition(session, task, TaskStatus.IN_PROGRESS, actor)
         report.approved += 1
     if review.returned_at is None:
