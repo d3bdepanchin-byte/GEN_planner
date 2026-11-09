@@ -467,3 +467,19 @@ def test_edit_timecode_not_in_recording_emptied(session, make_deps, source, tran
     rep = extract_source(session, source, transcript, deps)
     assert session.scalars(select(TaskEdit)).one().timecode is None
     assert 'правка к И-021: таймкод не найден в записи' in rep.notes
+
+
+def test_null_timecode_asked(session, make_deps, source, transcript):
+    deps = make_deps(result([candidate(timecode=None)]))
+    extract_source(session, source, transcript, deps)
+    t = first_task(session, source)
+    assert t.timecode is None and 'таймкод не указан' in t.questions
+    assert 'таймкод не найден в записи' not in t.questions
+
+
+def test_edit_null_timecode_noted(session, make_deps, source, transcript, task_21):
+    deps = make_deps(result(edits=[{'task_number': 'И-021', 'change': 'выполнено',
+                                    'quote': 'И-021 — выполнено', 'timecode': None}]))
+    rep = extract_source(session, source, transcript, deps)
+    assert session.scalars(select(TaskEdit)).one().timecode is None
+    assert 'правка к И-021: таймкод не указан' in rep.notes

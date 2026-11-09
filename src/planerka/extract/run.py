@@ -46,6 +46,7 @@ _OPEN = tuple(s.value for s in (TaskStatus.CANDIDATE, TaskStatus.CONFIRMED_BY_EX
 _PART = re.compile(r'([A-Z]+)(\d+)')
 _TIMECODE = re.compile(r'\[\d{2,}:\d{2}\]')
 NO_TIMECODE = 'таймкод не найден в записи'
+NO_TIMECODE_GIVEN = 'таймкод не указан'
 NO_OWNER, NO_TYPE = 'ответственный не назван', 'тип не указан'
 # Роль поля с человеком: (именительный, родительный) — для вопросов.
 _OWNER, _COEXECUTOR, _AUTHOR = (('ответственный', 'ответственного'),
@@ -94,12 +95,13 @@ class _Recording:
         notes += found
         return out
 
-    def timecode(self, value: str | None) -> tuple[str | None, bool]:
-        """(таймкод или None, принят ли). Пустой — принят: таймкод не обязателен."""
-        if value is None:
-            return None, True
+    def timecode(self, value: str | None) -> tuple[str | None, str | None]:
+        """(таймкод или None, вопрос или None). Источник задачи — таймкод и цитата: пустой
+        таймкод не додумывается (правило 2), а становится вопросом."""
+        if value is None or not value.strip():
+            return None, NO_TIMECODE_GIVEN
         ok = _TIMECODE.fullmatch(value) is not None and value in self.timecodes
-        return (value, True) if ok else (None, False)
+        return (value, None) if ok else (None, NO_TIMECODE)
 
 
 def analyze_source(session: Session, source: Source, transcript: Transcript,
@@ -171,7 +173,8 @@ def extract_source(session: Session, source: Source, transcript: Transcript,
 
 def _kind(note: str) -> str:
     """Заметка без ФИО для отчёта: «выбрать: …» — просто неоднозначный токен."""
-    return note if note in (UNKNOWN, NOT_IN_RECORDING, NO_TIMECODE) else 'неоднозначный токен'
+    return (note if note in (UNKNOWN, NOT_IN_RECORDING, NO_TIMECODE, NO_TIMECODE_GIVEN)
+            else 'неоднозначный токен')
 
 
 def _task_edit(session: Session, rec: _Recording, edit: EditOut,
@@ -188,9 +191,9 @@ def _task_edit(session: Session, rec: _Recording, edit: EditOut,
         return None
     notes: list[str] = []
     change, quote = rec.text(edit.change, notes), rec.text(edit.quote, notes)
-    timecode, ok = rec.timecode(edit.timecode)
-    if not ok:
-        notes.append(NO_TIMECODE)
+    timecode, problem = rec.timecode(edit.timecode)
+    if problem:
+        notes.append(problem)
     report_notes += [f'правка к {label}: {_kind(n)}' for n in dict.fromkeys(notes)]
     return TaskEdit(task_number=number, change=change, quote=quote or None, timecode=timecode,
                     source_id=rec.source.id, status=TaskStatus.CANDIDATE.value)
@@ -253,9 +256,9 @@ def _candidate_task(session: Session, rec: _Recording, c: CandidateOut, final_bl
     done = rec.text(c.done_criteria, notes) if c.done_criteria is not None else None
     reason = rec.text(c.confidence_reason, notes)
     asked = [q for q in (rec.text(q, notes) for q in c.questions) if q.strip()]
-    timecode, ok = rec.timecode(c.timecode)
-    if not ok:
-        questions.append(NO_TIMECODE)
+    timecode, problem = rec.timecode(c.timecode)
+    if problem:
+        questions.append(problem)
     flags: list[str] = []
     if not final_block_found:
         flags.append(NO_FINAL_BLOCK)
