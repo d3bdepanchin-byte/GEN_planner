@@ -1,6 +1,8 @@
 services:
   db:
     image: postgres:16
+    # После перезагрузки сервера БД поднимается сама: без неё воркер не отправит и алерт.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: planerka
       POSTGRES_PASSWORD: planerka  # локальная dev-база, не секрет
@@ -28,6 +30,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://planerka:planerka@db:5432/planerka
       DATABASE_URL_TEST: postgresql+psycopg://planerka:planerka@db:5432/planerka_test
+      # Как у worker (R16): модели только из локального кэша, без обращения к сети.
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: /app/models/hf
     volumes:
       - .:/app
     working_dir: /app
